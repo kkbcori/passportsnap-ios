@@ -1,0 +1,104 @@
+# ios/fastlane/Fastfile
+#
+# PassportSnap iOS — Fastlane configuration
+#
+# Lanes:
+#   build   → compile + archive → produces PassportSnap.ipa
+#   deploy  → build + upload to TestFlight
+#
+# Called from GitHub Actions:
+#   bundle exec fastlane build
+#   bundle exec fastlane deploy
+#
+# Can also be called locally from a Mac:
+#   cd ios && bundle exec fastlane build
+#   cd ios && bundle exec fastlane deploy
+
+default_platform :ios
+
+# ── App Store Connect API key ───────────────────────────────────────────────
+# Reads from environment variables set by GitHub Actions secrets.
+# This avoids interactive Apple ID 2FA prompts during CI.
+def api_key
+  app_store_connect_api_key(
+    key_id:        ENV["APP_STORE_CONNECT_KEY_ID"],
+    issuer_id:     ENV["APP_STORE_CONNECT_ISSUER_ID"],
+    key_content:   Base64.strict_decode64(ENV["APP_STORE_CONNECT_KEY_BASE64"]),
+    is_key_content_base64: false,    # already decoded above
+    in_house:      false             # App Store (not Enterprise)
+  )
+end
+
+platform :ios do
+
+  # ── before_all ─────────────────────────────────────────────────────────────
+  # Runs before every lane. Cleans stale derived data so we always get a
+  # clean build (avoids "file not found" ghost errors from previous runs).
+  before_all do
+    clear_derived_data(derived_data_path: "build/DerivedData")
+  end
+
+  # ── Lane: build ────────────────────────────────────────────────────────────
+  # Compiles the app, signs it, and produces build/PassportSnap.ipa
+  desc "Build and sign PassportSnap for App Store distribution"
+  lane :build do
+    # Sync signing certificates & profiles from Apple (read-only)
+    # This downloads the correct provisioning profile for the bundle ID.
+    # In CI we use the profile installed from GitHub Secrets instead, so
+    # this is commented out — uncomment if you want match-based signing.
+    # sync_code_signing(type: "appstore", readonly: true)
+
+    # Build the archive
+    build_app(
+      workspace:              "PassportSnap.xcworkspace",
+      scheme:                 "PassportSnap",
+      configuration:          "Release",
+      output_directory:       "build",
+      output_name:            "PassportSnap.ipa",
+      derived_data_path:      "build/DerivedData",
+      export_method:          "app-store",
+      export_options: {
+        provisioningProfiles: {
+          "com.passportsnap" => "PassportSnap App Store"
+          # ^ Must match the Name field of your provisioning profile exactly.
+          #   Check in Apple Developer → Profiles → your profile → Name field.
+        },
+        signingStyle:         "manual",
+        stripSwiftSymbols:    true,
+        uploadBitcode:        false,
+        uploadSymbols:        true,
+        compileBitcode:       false
+      },
+      # Suppress verbose xcodebuild output — errors still show
+      buildlog_path:          "build/logs",
+      suppress_xcode_output:  false
+    )
+
+    UI.success "✅ Build complete → ios/build/PassportSnap.ipa"
+  end
+
+  # ── Lane: deploy ───────────────────────────────────────────────────────────
+  # Runs build then uploads the IPA to TestFlight.
+  # Only called from GitHub Actions on pushes to main.
+  desc "Build and upload to TestFlight"
+  lane :deploy do
+    build   # run the build lane first
+
+    upload_to_testflight(
+      api_key:               api_key,
+      ipa:                   "build/PassportSnap.ipa",
+      skip_waiting_for_build_processing: true,   # don't block CI — processing takes ~10 min
+      notify_external_testers: false,             # don't auto-notify testers yet
+      changelog:             "Build #{ENV['GITHUB_RUN_NUMBER']} — automated CI build"
+    )
+
+    UI.success "✅ Uploaded to TestFlight — build #{ENV['GITHUB_RUN_NUMBER']}"
+  end
+
+  # ── Error handler ──────────────────────────────────────────────────────────
+  error do |lane, exception|
+    UI.error "Lane #{lane} failed: #{exception.message}"
+    # Optionally send a Slack/email notification here
+  end
+
+end

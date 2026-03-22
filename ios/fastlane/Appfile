@@ -1,0 +1,11 @@
+# ios/fastlane/Appfile
+#
+# App identity used by all Fastlane lanes.
+# These values must match App Store Connect exactly.
+
+app_identifier "com.passportsnap"          # Bundle ID
+apple_id       "YOUR_APPLE_ID@EMAIL.COM"   # Your Apple Developer email — replace this
+
+# App Store Connect Team (only needed if you belong to multiple teams)
+# itc_team_id "YOUR_ITC_TEAM_ID"
+# team_id     "YOUR_TEAM_ID"

@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+	<!-- ── App identity ───────────────────────────────────────────────── -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>PassportSnap</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+
+	<!-- ── Platform ───────────────────────────────────────────────────── -->
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!-- ── Privacy permission strings ─────────────────────────────────── -->
+	<!--
+	  Apple WILL reject your app if any of these are empty or missing.
+	  The strings appear in the system permission dialogs shown to users.
+	  Keep them concise, honest, and user-facing.
+	-->
+
+	<!-- react-native-image-picker: selecting photos from the gallery -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>PassportSnap needs access to your photo library so you can select the photo you want to use for your passport.</string>
+
+	<!-- @react-native-camera-roll/camera-roll: saving the finished photo -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>PassportSnap saves your processed passport photo directly to your photo library — no copy is sent anywhere else.</string>
+
+	<!-- Camera (not currently used — included to prevent future crashes if camera is added) -->
+	<!-- Remove this key if you never launch the camera -->
+	<key>NSCameraUsageDescription</key>
+	<string>PassportSnap can use your camera to take a passport photo directly instead of uploading from your library.</string>
+
+	<!-- ── Network security ────────────────────────────────────────────── -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- All processing is on-device. Remote calls go only to RevenueCat's
+		     HTTPS endpoints. Do NOT set NSAllowsArbitraryLoads to true. -->
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- ── UI configuration ────────────────────────────────────────────── -->
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+
+	<!-- Portrait only — passport photos are always taken in portrait -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+
+	<!-- iPad (if you ever support it) -->
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+
+	<!-- Let React Native control the status bar -->
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+
+	<!-- Required capabilities — armv7 removed; modern iOS requires arm64 -->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+
+	<!-- ── Background / appearance ─────────────────────────────────────── -->
+	<!-- Dark UI — prevents white flash on launch -->
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+
+</dict>
+</plist>

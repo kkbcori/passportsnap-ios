@@ -1,0 +1,7 @@
+# ios/Gemfile
+# Locks Fastlane and its dependencies to specific versions for reproducible builds.
+# Run `bundle install` once on the Mac, then commit Gemfile.lock to the repo.
+
+source "https://rubygems.org"
+
+gem "fastlane", "~> 2.220"
