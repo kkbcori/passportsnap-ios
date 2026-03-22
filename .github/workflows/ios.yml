@@ -3,20 +3,17 @@
 # PassportSnap iOS — Build & Deploy to TestFlight
 #
 # Triggers:
-#   • Every push to `main`        → builds + uploads to TestFlight
-#   • Every pull request to `main`→ builds only (no upload), confirms nothing is broken
+#   • Every push to `main`         → builds + uploads to TestFlight
+#   • Every pull request to `main` → builds only (no upload)
 #   • Manual trigger via GitHub UI (workflow_dispatch)
 #
-# Required GitHub Secrets (Settings → Secrets and variables → Actions → New secret):
-#
-#   CERTIFICATE_BASE64          Base64-encoded Apple Distribution .p12 certificate
-#   CERTIFICATE_PASSWORD        Password for the .p12 file
-#   PROVISIONING_PROFILE_BASE64 Base64-encoded .mobileprovision file
-#   APP_STORE_CONNECT_KEY_ID    App Store Connect API key ID  (e.g. AB12CD34EF)
-#   APP_STORE_CONNECT_ISSUER_ID App Store Connect issuer UUID
-#   APP_STORE_CONNECT_KEY_BASE64 Base64-encoded .p8 API private key file
-#
-# See README.md → "Setting Up GitHub Secrets" for how to obtain each of these.
+# Required GitHub Secrets:
+#   CERTIFICATE_BASE64           Base64-encoded Apple Distribution .p12
+#   CERTIFICATE_PASSWORD         Password for the .p12
+#   PROVISIONING_PROFILE_BASE64  Base64-encoded .mobileprovision
+#   APP_STORE_CONNECT_KEY_ID     Key ID (e.g. AB12CD34EF)
+#   APP_STORE_CONNECT_ISSUER_ID  Issuer UUID
+#   APP_STORE_CONNECT_KEY_BASE64 Base64-encoded .p8 API key
 
 name: iOS Build & Deploy
 
@@ -25,9 +22,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:      # allows manual trigger from GitHub Actions tab
+  workflow_dispatch:
 
-# Cancel any in-progress build for the same branch when a new push arrives
 concurrency:
   group: ios-${{ github.ref }}
   cancel-in-progress: true
@@ -35,7 +31,7 @@ concurrency:
 jobs:
   build-and-deploy:
     name: Build iOS & Upload to TestFlight
-    runs-on: macos-14          # Apple Silicon Mac runner — fastest for Xcode builds
+    runs-on: macos-14
 
     steps:
 
@@ -48,22 +44,20 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          #cache: 'npm'
 
       # ── 3. JS dependencies ─────────────────────────────────────────────────
       - name: Install Node dependencies
-        run: npm install #ci              # ci is faster and more reliable than install in CI
+        run: npm install
 
       # ── 4. Ruby + Fastlane ─────────────────────────────────────────────────
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.2'
-          bundler-cache: true    # caches gems between runs
+          bundler-cache: true
           working-directory: ios
 
       # ── 5. CocoaPods cache ─────────────────────────────────────────────────
-      # Caching Pods saves ~3 min on every run after the first
       - name: Cache CocoaPods
         uses: actions/cache@v4
         with:
@@ -77,12 +71,9 @@ jobs:
           cd ios
           pod install --repo-update
         env:
-          # Suppress noisy CocoaPods warnings
           COCOAPODS_DISABLE_STATS: true
 
       # ── 7. Code signing ────────────────────────────────────────────────────
-      # Installs the distribution certificate and provisioning profile from
-      # GitHub Secrets into the macOS keychain on the runner.
       - name: Install Apple certificate and provisioning profile
         env:
           CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
@@ -90,15 +81,13 @@ jobs:
           PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: runner-keychain-${{ github.run_id }}
         run: |
-          # Write certificate and profile to temp files
           CERT_PATH=$RUNNER_TEMP/cert.p12
           PP_PATH=$RUNNER_TEMP/profile.mobileprovision
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
 
-          echo -n "$CERTIFICATE_BASE64"        | base64 --decode -o $CERT_PATH
+          echo -n "$CERTIFICATE_BASE64"          | base64 --decode -o $CERT_PATH
           echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o $PP_PATH
 
-          # Create a temporary keychain and import certificate
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
@@ -108,23 +97,26 @@ jobs:
             -k $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
-          # Install provisioning profile
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          PP_UUID=$(security cms -D -i $PP_PATH | \
-            plutil -extract UUID raw -)
-          cp $PP_PATH \
-            ~/Library/MobileDevice/Provisioning\ Profiles/$PP_UUID.mobileprovision
+          PP_UUID=$(security cms -D -i $PP_PATH | plutil -extract UUID raw -)
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/$PP_UUID.mobileprovision
           echo "Installed provisioning profile: $PP_UUID"
 
-      # ── 8. Bump build number ───────────────────────────────────────────────
-      # Uses the GitHub Actions run number so every build has a unique build number.
-      # This is required by App Store Connect — it rejects duplicate build numbers.
+      # ── 8. Set NODE_BINARY so xcodebuild can find node for JS bundling ──────
+      # The React Native "Bundle React Native code and images" build phase
+      # reads .xcode.env.local to find the node binary. Without this the
+      # phase fails on GitHub-hosted runners where node is not in the
+      # default xcodebuild PATH.
+      - name: Write NODE_BINARY to .xcode.env.local
+        run: echo "NODE_BINARY=$(which node)" > ios/.xcode.env.local
+
+      # ── 9. Bump build number ───────────────────────────────────────────────
       - name: Set build number to ${{ github.run_number }}
         run: |
           cd ios
           agvtool new-version -all ${{ github.run_number }}
 
-      # ── 9. Build archive ───────────────────────────────────────────────────
+      # ── 10. Build archive ──────────────────────────────────────────────────
       - name: Build & archive with Fastlane
         run: |
           cd ios
@@ -134,7 +126,7 @@ jobs:
           APP_STORE_CONNECT_ISSUER_ID:  ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY_BASE64 }}
 
-      # ── 10. Upload to TestFlight (main branch only) ─────────────────────────
+      # ── 11. Upload to TestFlight (main branch only) ────────────────────────
       - name: Upload to TestFlight
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         run: |
@@ -145,8 +137,7 @@ jobs:
           APP_STORE_CONNECT_ISSUER_ID:  ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY_BASE64 }}
 
-      # ── 11. Upload IPA as build artifact ───────────────────────────────────
-      # Even on PRs, the IPA is available for manual download from the Actions tab
+      # ── 12. Upload IPA as artifact ─────────────────────────────────────────
       - name: Upload IPA artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -155,7 +146,7 @@ jobs:
           path: ios/build/PassportSnap.ipa
           retention-days: 14
 
-      # ── 12. Clean up keychain ──────────────────────────────────────────────
+      # ── 13. Clean up keychain ──────────────────────────────────────────────
       - name: Clean up keychain and provisioning profile
         if: always()
         run: |
