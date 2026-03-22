@@ -52,7 +52,7 @@ jobs:
 
       # ── 3. JS dependencies ─────────────────────────────────────────────────
       - name: Install Node dependencies
-        run: npm ci              # ci is faster and more reliable than install in CI
+        run: npm install #ci              # ci is faster and more reliable than install in CI
 
       # ── 4. Ruby + Fastlane ─────────────────────────────────────────────────
       - name: Set up Ruby
