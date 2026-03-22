@@ -447,7 +447,19 @@ class PassportProcessor: NSObject {
             maskH = CVPixelBufferGetHeight(buf)
             guard let base = CVPixelBufferGetBaseAddress(buf) else { return }
             let ptr = base.assumingMemoryBound(to: Float32.self)
-            maskPixels = Array(UnsafeBufferPointer(start: ptr, count: maskW * maskH))
+            // CVPixelBuffer rows may have padding (bytesPerRow >= maskW * 4).
+            // Reading maskW*maskH floats without stride causes SIGSEGV on real devices.
+            let bytesPerRow  = CVPixelBufferGetBytesPerRow(buf)
+            let floatsPerRow = bytesPerRow / MemoryLayout<Float32>.size
+            var flat = [Float](repeating: 0, count: maskW * maskH)
+            for row in 0..<maskH {
+                let src = ptr.advanced(by: row * floatsPerRow)
+                let base2 = row * maskW
+                for col in 0..<maskW {
+                    flat[base2 + col] = src[col]
+                }
+            }
+            maskPixels = flat
         }
         request.qualityLevel = .accurate
 
