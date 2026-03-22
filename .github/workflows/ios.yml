@@ -50,21 +50,18 @@ jobs:
         env:
           COCOAPODS_DISABLE_STATS: true
 
-      - name: Install Apple certificate and provisioning profile
+      # Install ONLY the certificate — profile is downloaded fresh by Fastlane
+      - name: Install Apple Distribution certificate
         env:
           CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
-          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: runner-keychain-${{ github.run_id }}
         run: |
           CERT_PATH=$RUNNER_TEMP/cert.p12
-          PP_PATH=$RUNNER_TEMP/profile.mobileprovision
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
 
-          echo -n "$CERTIFICATE_BASE64"          | base64 --decode -o $CERT_PATH
-          echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
 
-          # Create temporary keychain
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
@@ -73,23 +70,7 @@ jobs:
             -A -t cert -f pkcs12 \
             -k $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
-
-          # Install provisioning profile using decoded XML (macOS 15 compatible)
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-
-          # Decode the profile to a plist so we can extract the UUID
-          security cms -D -i $PP_PATH -o $RUNNER_TEMP/profile.plist
-
-          # Extract UUID using PlistBuddy (more reliable than plutil pipe on macOS 15)
-          PP_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" $RUNNER_TEMP/profile.plist)
-          echo "Profile UUID: $PP_UUID"
-
-          # Copy profile with UUID filename (required by Xcode)
-          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/$PP_UUID.mobileprovision
-          echo "Installed: ~/Library/MobileDevice/Provisioning Profiles/$PP_UUID.mobileprovision"
-
-          # Verify installation
-          ls ~/Library/MobileDevice/Provisioning\ Profiles/
+          echo "Certificate installed ✓"
 
       - name: Write NODE_BINARY to .xcode.env.local
         run: echo "NODE_BINARY=$(which node)" > ios/.xcode.env.local
@@ -112,6 +93,7 @@ jobs:
       - name: Build & archive with Fastlane
         run: |
           cd ios
+          mkdir -p build/profiles
           bundle exec fastlane build
         env:
           APP_STORE_CONNECT_KEY_ID:     ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
@@ -136,8 +118,7 @@ jobs:
           path: ios/build/PassportSnap.ipa
           retention-days: 14
 
-      - name: Clean up keychain and provisioning profile
+      - name: Clean up keychain
         if: always()
         run: |
           security delete-keychain $RUNNER_TEMP/build.keychain 2>/dev/null || true
-          rm -f ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision
