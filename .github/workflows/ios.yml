@@ -64,6 +64,7 @@ jobs:
           echo -n "$CERTIFICATE_BASE64"          | base64 --decode -o $CERT_PATH
           echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o $PP_PATH
 
+          # Create temporary keychain
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
@@ -73,10 +74,22 @@ jobs:
             -k $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
+          # Install provisioning profile using decoded XML (macOS 15 compatible)
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          PP_UUID=$(security cms -D -i $PP_PATH | plutil -extract UUID raw -)
+
+          # Decode the profile to a plist so we can extract the UUID
+          security cms -D -i $PP_PATH -o $RUNNER_TEMP/profile.plist
+
+          # Extract UUID using PlistBuddy (more reliable than plutil pipe on macOS 15)
+          PP_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" $RUNNER_TEMP/profile.plist)
+          echo "Profile UUID: $PP_UUID"
+
+          # Copy profile with UUID filename (required by Xcode)
           cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/$PP_UUID.mobileprovision
-          echo "Installed provisioning profile: $PP_UUID"
+          echo "Installed: ~/Library/MobileDevice/Provisioning Profiles/$PP_UUID.mobileprovision"
+
+          # Verify installation
+          ls ~/Library/MobileDevice/Provisioning\ Profiles/
 
       - name: Write NODE_BINARY to .xcode.env.local
         run: echo "NODE_BINARY=$(which node)" > ios/.xcode.env.local
@@ -94,8 +107,7 @@ jobs:
             --platform ios \
             --dev false \
             --bundle-output ios/main.jsbundle \
-            --assets-dest ios/assets \
-            --verbose
+            --assets-dest ios/assets
 
       - name: Build & archive with Fastlane
         run: |
