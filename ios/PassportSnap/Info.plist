@@ -92,5 +92,11 @@
 	<key>UIUserInterfaceStyle</key>
 	<string>Dark</string>
 
+	<!-- ── Export compliance ───────────────────────────────────────────── -->
+	<!-- App uses only standard iOS encryption (HTTPS via system APIs).    -->
+	<!-- This key prevents Apple from asking about encryption every build. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
 </dict>
 </plist>

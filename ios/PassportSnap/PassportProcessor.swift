@@ -56,49 +56,54 @@ class PassportProcessor: NSObject {
         let hairMult: Double
     }
 
+    // Specs derived directly from spreadsheet (Countries_Measurements.xlsx):
+    // ovalOuterTop  = gapMm * pxPerMm  (gap from top of photo to top of hair)
+    // ovalOuterBottom = ovalOuterTop + faceMm * pxPerMm  (face height = crown to chin)
+    // topGap = 0  →  targetHairTopInOutput = ovalOuterTop  (crown anchors to green line)
+    // ovalFill = 1.0  →  targetHeadPx = ovalH = facePx  (exact face height match)
     private static let US_SPEC = Spec(
         outW: 600, outH: 600, dpi: 300,
         photoHeightMm: 51.0,
-        faceFrac: 0.5933, crownTopFrac: 0.1383,
-        targetEyeY: 237,
-        ovalOuterTop: 55,  ovalOuterBottom: 467,
-        ovalInnerTop: 100, ovalInnerBottom: 422,
-        headMinPx: 294, headMaxPx: 412,
-        ovalFill: 0.868, topGap: 0.10,
-        headTopMm: 8.2, hairMult: 1.12
+        faceFrac: 0.597, crownTopFrac: 0.160,
+        targetEyeY: 262,
+        ovalOuterTop: 96,  ovalOuterBottom: 454,   // gap=8.2mm, face=30.4mm
+        ovalInnerTop: 125, ovalInnerBottom: 436,
+        headMinPx: 329, headMaxPx: 387,
+        ovalFill: 1.0, topGap: 0.0,
+        headTopMm: nil, hairMult: 1.20
     )
     private static let UK_SPEC = Spec(
         outW: 900, outH: 1200, dpi: 600,
         photoHeightMm: 45.0,
-        faceFrac: 0.70, crownTopFrac: 0.15,
-        targetEyeY: 543,
-        ovalOuterTop: 133,  ovalOuterBottom: 997,
-        ovalInnerTop: 181, ovalInnerBottom: 949,
-        headMinPx: 820, headMaxPx: 907,
+        faceFrac: 0.720, crownTopFrac: 0.111,
+        targetEyeY: 560,
+        ovalOuterTop: 133,  ovalOuterBottom: 997,   // gap=5.0mm, face=32.4mm
+        ovalInnerTop: 202,  ovalInnerBottom: 954,
+        headMinPx: 795, headMaxPx: 933,
         ovalFill: 1.0, topGap: 0.0,
-        headTopMm: 5.0, hairMult: 1.22
+        headTopMm: nil, hairMult: 1.22
     )
     private static let AUS_SPEC = Spec(
         outW: 900, outH: 1200, dpi: 600,
         photoHeightMm: 45.0,
-        faceFrac: 0.7333, crownTopFrac: 0.122,
-        targetEyeY: 543,
-        ovalOuterTop: 133,  ovalOuterBottom: 997,
-        ovalInnerTop: 181, ovalInnerBottom: 949,
-        headMinPx: 820, headMaxPx: 907,
+        faceFrac: 0.720, crownTopFrac: 0.111,
+        targetEyeY: 560,
+        ovalOuterTop: 133,  ovalOuterBottom: 997,   // gap=5.0mm, face=32.4mm
+        ovalInnerTop: 202,  ovalInnerBottom: 954,
+        headMinPx: 795, headMaxPx: 933,
         ovalFill: 1.0, topGap: 0.0,
-        headTopMm: 5.0, hairMult: 1.22
+        headTopMm: nil, hairMult: 1.22
     )
     private static let CAN_SPEC = Spec(
         outW: 1200, outH: 1680, dpi: 610,
         photoHeightMm: 70.0,
-        faceFrac: 0.4786, crownTopFrac: 0.12,
-        targetEyeY: 606,
-        ovalOuterTop: 170,  ovalOuterBottom: 1116,
-        ovalInnerTop: 200, ovalInnerBottom: 1028,
-        headMinPx: 744, headMaxPx: 864,
-        ovalFill: 0.850, topGap: 0.06,
-        headTopMm: 10.0, hairMult: 1.075
+        faceFrac: 0.479, crownTopFrac: 0.143,
+        targetEyeY: 660,
+        ovalOuterTop: 240,  ovalOuterBottom: 1044,  // gap=10.0mm, face=33.5mm
+        ovalInnerTop: 304,  ovalInnerBottom: 1004,
+        headMinPx: 740, headMaxPx: 868,
+        ovalFill: 1.0, topGap: 0.0,
+        headTopMm: nil, hairMult: 1.075
     )
 
     private func getSpec(_ country: String) -> Spec {
@@ -247,23 +252,24 @@ class PassportProcessor: NSObject {
         // Only trust the result if it is clearly ABOVE the face bounding box top.
         // Light-skinned foreheads are bright (>185) so the scan can stop immediately
         // inside the face box — in that case fall back to a hairMult estimate.
-        let hairMultFallback = 1.12
-        let fallbackCrownY   = max(0, fd.fy - Int(Double(fd.fh) * (hairMultFallback - 1.0)))
+        // Fallback: Vision bounding box top (fy) ≈ hairline.
+        // Add 20% of face height above fy to estimate top of hair.
+        let fallbackCrownY = max(0, fd.fy - Int(Double(fd.fh) * 0.20))
+        // Use the pixel-scan result only if it found background clearly above fy.
+        // Otherwise use the hairMult estimate (20% above Vision bounding box top).
+        let refinedCrownY: Int
         if let refined = refineCrown(cgImage: cgImage,
                                      crownEstimate: fd.crownY,
                                      fy: fd.fy, fh: fd.fh,
                                      faceCx: fd.faceCx, fw: fd.fw,
-                                     imgW: w, imgH: h) {
-            // Accept only if scan found something meaningfully above fy
-            // (at least 8% of face height above the face bounding box top).
-            let minAcceptableCrown = fd.fy - Int(Double(fd.fh) * 0.08)
-            let trustedCrown = refined < minAcceptableCrown ? refined : fallbackCrownY
-            fd = FaceData(fx: fd.fx, fy: fd.fy, fw: fd.fw, fh: fd.fh,
-                          eyeY: fd.eyeY, crownY: trustedCrown, chinY: fd.chinY, faceCx: fd.faceCx)
+                                     imgW: w, imgH: h),
+           refined < fd.fy - Int(Double(fd.fh) * 0.06) {
+            refinedCrownY = refined
         } else {
-            fd = FaceData(fx: fd.fx, fy: fd.fy, fw: fd.fw, fh: fd.fh,
-                          eyeY: fd.eyeY, crownY: fallbackCrownY, chinY: fd.chinY, faceCx: fd.faceCx)
+            refinedCrownY = fallbackCrownY
         }
+        fd = FaceData(fx: fd.fx, fy: fd.fy, fw: fd.fw, fh: fd.fh,
+                      eyeY: fd.eyeY, crownY: refinedCrownY, chinY: fd.chinY, faceCx: fd.faceCx)
 
         return fd
     }
@@ -1050,9 +1056,8 @@ class PassportProcessor: NSObject {
                     }
 
                     let topS = Int(Double(hairTopYP) * scale) - targetHairTopInOutput
-                    let imgCxP = Double(paddedW) / 2.0
-                    let blendedCx = Double(faceCxP) * 0.7 + imgCxP * 0.3
-                    let leftS = Int(blendedCx * scale) - spec.outW / 2
+                    // Centre on face horizontally — pure face centre, no image-centre blend
+                    let leftS = Int(Double(faceCxP) * scale) - spec.outW / 2
 
                     cropX = Int((Double(leftS) / scale).rounded())
                     cropY = Int((Double(topS)  / scale).rounded())
