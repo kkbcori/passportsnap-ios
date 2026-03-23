@@ -433,14 +433,11 @@ class PassportProcessor: NSObject {
 
     // MARK: ── Background Removal ──────────────────────────────────────────
 
-    /// iOS 15+: Use VNGeneratePersonSegmentationRequest (ML-based, equivalent to ML Kit).
-    /// iOS 13/14: Fall back to CIToneCurve highlight pull.
+    /// Background lightening using CIToneCurve — reliable across all iOS versions.
+    /// VNGeneratePersonSegmentationRequest was producing NaN masks and over-whitening
+    /// on iOS 26 devices, so we use the tone-curve approach for all versions.
     private func whitenBackground(image: UIImage, face: FaceData) -> UIImage {
-        if #available(iOS 15.0, *) {
-            return whitenBackgroundSegmentation(image: image, face: face)
-        } else {
-            return whitenBackgroundToneCurve(image: image)
-        }
+        return whitenBackgroundToneCurve(image: image)
     }
 
     @available(iOS 15.0, *)
@@ -490,7 +487,7 @@ class PassportProcessor: NSObject {
         // ── 2. Sigmoid sharpening ──
         for i in 0..<rawMask.count {
             let v = rawMask[i]
-            guard v.isFinite else { rawMask[i] = 0; continue }
+            guard v.isFinite else { rawMask[i] = 1; continue }
             let sigmoid = Float(1.0 / (1.0 + exp(Double(-12.0 * (v - 0.45)))))
             rawMask[i] = sigmoid.isFinite ? sigmoid : 0
         }
@@ -550,8 +547,8 @@ class PassportProcessor: NSObject {
                 if dist < 60 { alpha = min(1, alpha * 1.6) }
             }
 
-            // Guard against NaN/infinity from mask processing
-            if !alpha.isFinite { alpha = 0 }
+            // Guard against NaN/infinity — treat as fully person (keep pixel)
+            if !alpha.isFinite { alpha = 1 }
             alpha = alpha.clamped(to: 0...1)
 
             if alpha >= 0.99 {
@@ -568,29 +565,56 @@ class PassportProcessor: NSObject {
             }
         }
 
-        return rebuildImage(pixels: pixels, width: w, height: h) ?? image
+        guard let result = rebuildImage(pixels: pixels, width: w, height: h) else {
+            return whitenBackgroundToneCurve(image: image)
+        }
+
+        // Sanity check: if >75% of pixels are near-white the segmentation failed.
+        // Fall back to gentle tone-curve approach to avoid returning a blank image.
+        var whiteCount = 0
+        let total = w * h
+        for idx in stride(from: 0, to: pixels.count - 2, by: 4) {
+            if pixels[idx] > 240 && pixels[idx+1] > 240 && pixels[idx+2] > 240 {
+                whiteCount += 1
+            }
+        }
+        if whiteCount > total * 3 / 4 {
+            return whitenBackgroundToneCurve(image: image)
+        }
+        return result
     }
 
     /// Fallback for iOS 13/14: CIToneCurve pulls highlights to white.
+    /// Lifts near-white background pixels to pure white while preserving
+    /// skin/hair tones. More aggressive highlight pull than the previous version.
     private func whitenBackgroundToneCurve(image: UIImage) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
         var ci = CIImage(cgImage: cgImage)
 
+        // Step 1: mild brightness lift + slight contrast
         if let f = CIFilter(name: "CIColorControls") {
             f.setValue(ci, forKey: kCIInputImageKey)
-            f.setValue(0.08, forKey: kCIInputBrightnessKey)
-            f.setValue(1.04, forKey: kCIInputContrastKey)
+            f.setValue(0.10, forKey: kCIInputBrightnessKey)
+            f.setValue(1.05, forKey: kCIInputContrastKey)
             if let out = f.outputImage { ci = out }
         }
+
+        // Step 2: aggressive tone curve — shadow/midtone intact, highlights → white
+        //   0.00 → 0.00  (black stays black)
+        //   0.25 → 0.23  (shadows almost unchanged)
+        //   0.50 → 0.50  (midtones neutral)
+        //   0.78 → 0.93  (upper highlights strongly pulled toward white)
+        //   1.00 → 1.00  (white stays white)
         if let f = CIFilter(name: "CIToneCurve") {
             f.setValue(ci, forKey: kCIInputImageKey)
             f.setValue(CIVector(x: 0.00, y: 0.00), forKey: "inputPoint0")
-            f.setValue(CIVector(x: 0.25, y: 0.24), forKey: "inputPoint1")
+            f.setValue(CIVector(x: 0.25, y: 0.23), forKey: "inputPoint1")
             f.setValue(CIVector(x: 0.50, y: 0.50), forKey: "inputPoint2")
-            f.setValue(CIVector(x: 0.75, y: 0.86), forKey: "inputPoint3")
+            f.setValue(CIVector(x: 0.78, y: 0.93), forKey: "inputPoint3")
             f.setValue(CIVector(x: 1.00, y: 1.00), forKey: "inputPoint4")
             if let out = f.outputImage { ci = out }
         }
+
         guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return image }
         return UIImage(cgImage: cg)
     }
@@ -630,7 +654,7 @@ class PassportProcessor: NSObject {
                     let sy = min(max(y + k - radius, 0), h - 1)
                     v += temp[sy * w + x] * kernel[k]
                 }
-                result[y * w + x] = v.isFinite ? min(max(v, 0), 1) : 0
+                result[y * w + x] = v.isFinite ? min(max(v, 0), 1) : 1
             }
         }
         return result
