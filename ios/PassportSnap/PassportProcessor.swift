@@ -63,9 +63,9 @@ class PassportProcessor: NSObject {
         targetEyeY: 237,
         ovalOuterTop: 55,  ovalOuterBottom: 467,
         ovalInnerTop: 100, ovalInnerBottom: 422,
-        headMinPx: 300, headMaxPx: 412,
-        ovalFill: 0.87, topGap: 0.10,
-        headTopMm: nil, hairMult: 1.12
+        headMinPx: 294, headMaxPx: 412,
+        ovalFill: 0.868, topGap: 0.10,
+        headTopMm: 8.2, hairMult: 1.12
     )
     private static let UK_SPEC = Spec(
         outW: 900, outH: 1200, dpi: 600,
@@ -96,9 +96,9 @@ class PassportProcessor: NSObject {
         targetEyeY: 606,
         ovalOuterTop: 170,  ovalOuterBottom: 1116,
         ovalInnerTop: 200, ovalInnerBottom: 1028,
-        headMinPx: 614, headMaxPx: 870,
-        ovalFill: 0.9134, topGap: 0.06,
-        headTopMm: 14.0, hairMult: 1.075
+        headMinPx: 744, headMaxPx: 864,
+        ovalFill: 0.850, topGap: 0.06,
+        headTopMm: 10.0, hairMult: 1.075
     )
 
     private func getSpec(_ country: String) -> Spec {
@@ -318,8 +318,19 @@ class PassportProcessor: NSObject {
 
     // MARK: ── Photo Enhancement ───────────────────────────────────────────
 
-    /// Mirrors Android enhancePhoto():
-    /// gamma correction (face-centre metered) + histogram stretch (2–97 percentile) + unsharp mask.
+    /// Applies only a mild unsharp mask — no gamma correction, no histogram stretch.
+    /// This preserves natural skin tones which the full enhancePhoto() would shift.
+    /// iOS camera images are already well-processed by the camera pipeline.
+    private func mildSharpen(_ image: UIImage) -> UIImage {
+        guard let cgImage = image.cgImage else { return image }
+        var pixels = extractPixels(cgImage)
+        guard !pixels.isEmpty else { return image }
+        // Very light unsharp mask (amount=0.25, threshold=8) — barely perceptible
+        unsharpMask(&pixels, w: cgImage.width, h: cgImage.height, amount: 0.25, threshold: 8)
+        return rebuildImage(pixels: pixels, width: cgImage.width, height: cgImage.height) ?? image
+    }
+
+    /// Full enhancement kept for reference (currently disabled — shifts skin tone on iOS).
     private func enhancePhoto(_ image: UIImage) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
 
@@ -690,7 +701,7 @@ class PassportProcessor: NSObject {
             let minC = min(r, g, b) / 255.0
             let sat = maxC > 0 ? (maxC - minC) / maxC : 0
 
-            candidate[i] = (maxC > 0.55 && sat < 0.20 && gray > 120) || gray > 200
+            candidate[i] = (maxC > 0.85 && sat < 0.10 && gray > 200) || gray > 230
         }
 
         // ── Flood-fill BFS from top/left/right edges ──
@@ -718,15 +729,16 @@ class PassportProcessor: NSObject {
             }
         }
 
-        // Force non-dark pixels in pure headroom zone
-        let forceRows = max(1, headroomRows - 4)
+        // Force only very bright pixels in pure headroom zone (>220 = near white)
+        // Raised from 140 to protect dark skin and hair near the crown
+        let forceRows = max(1, headroomRows - 8)
         for y in 0..<forceRows {
             for x in 0..<w {
-                if grayVals[y * w + x] > 140 { bgMask[y * w + x] = true }
+                if grayVals[y * w + x] > 220 { bgMask[y * w + x] = true }
             }
         }
-        // Protect dark pixels (hair)
-        for i in 0..<zoneCount { if grayVals[i] < 100 { bgMask[i] = false } }
+        // Protect all non-very-bright pixels (raised from 100 to 200)
+        for i in 0..<zoneCount { if grayVals[i] < 200 { bgMask[i] = false } }
 
         // ── Apply: push toward white with fade at boundary ──
         for y in 0..<zoneH {
@@ -947,8 +959,8 @@ class PassportProcessor: NSObject {
                     )
                 }
 
-                // 6. Enhance (gamma + stretch + sharpen)
-                bmp = self.enhancePhoto(bmp)
+                // 6. Mild sharpening only — skip gamma/stretch which alters skin tone
+                bmp = self.mildSharpen(bmp)
 
                 // 7. Background removal
                 bmp = self.whitenBackground(image: bmp, face: origFace)
@@ -964,12 +976,13 @@ class PassportProcessor: NSObject {
                 let (padded, paddedW, paddedH) = self.padImage(bmp, padX: padX, padY: padY)
 
                 // 10. Auto-crop
-                let mlFh = origFace.fh
-                let hairMult = spec.hairMult
-                let headWithHair = Int(Double(mlFh) * hairMult)
+                // Use face-detected crownY directly — more accurate than hairMult estimate.
+                // headHeight = full head from crown to chin (what the overlay oval measures).
                 let faceCxP = origFace.faceCx + padX
-                let hairTopY = origFace.fy - Int(Double(mlFh) * (hairMult - 1.0))
-                let hairTopYP = hairTopY + padY
+                let hairTopYP = origFace.crownY + padY
+                let headHeight = max(1, origFace.chinY - origFace.crownY)
+                // Keep mlFh for fallback only
+                let mlFh = origFace.fh
 
                 var cropX = 0; var cropY = 0; var cropW = 0; var cropH = 0
 
@@ -977,7 +990,7 @@ class PassportProcessor: NSObject {
                     let ovalH = spec.ovalOuterBottom - spec.ovalOuterTop
                     let targetHeadPx = min(spec.headMaxPx,
                                           max(spec.headMinPx, Int(Double(ovalH) * spec.ovalFill)))
-                    let scale = Double(targetHeadPx) / Double(headWithHair)
+                    let scale = Double(targetHeadPx) / Double(headHeight)
 
                     let targetHairTopInOutput: Int
                     if let headTopMm = spec.headTopMm {
