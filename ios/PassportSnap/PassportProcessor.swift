@@ -350,8 +350,8 @@ class PassportProcessor: NSObject {
         var lumHist = [Int](repeating: 0, count: 256)
         for i in stride(from: 0, to: pixels.count, by: 4) {
             var lum = Float(pixels[i]) * 0.299 + Float(pixels[i+1]) * 0.587 + Float(pixels[i+2]) * 0.114
-            if gamma != 1.0 { lum = 255.0 * powf(lum / 255.0, gamma) }
-            lumHist[min(255, Int(lum))] += 1
+            if gamma != 1.0 { lum = 255.0 * powf(max(0, lum / 255.0), gamma) }
+            lumHist[min(255, max(0, lum.isFinite ? Int(lum) : 0))] += 1
         }
         let total = w * h
         let p2Threshold  = Int(Float(total) * 0.02)
@@ -369,18 +369,18 @@ class PassportProcessor: NSObject {
         for i in stride(from: 0, to: pixels.count, by: 4) {
             var r = Float(pixels[i]); var g = Float(pixels[i+1]); var b = Float(pixels[i+2])
             if gamma != 1.0 {
-                r = 255.0 * powf(r / 255.0, gamma)
-                g = 255.0 * powf(g / 255.0, gamma)
-                b = 255.0 * powf(b / 255.0, gamma)
+                r = 255.0 * powf(max(0, r / 255.0), gamma)
+                g = 255.0 * powf(max(0, g / 255.0), gamma)
+                b = 255.0 * powf(max(0, b / 255.0), gamma)
             }
             if stretch != 1.0 {
                 r = ((r - p2) * stretch + 3.0).clamped(to: 0...255)
                 g = ((g - p2) * stretch + 3.0).clamped(to: 0...255)
                 b = ((b - p2) * stretch + 3.0).clamped(to: 0...255)
             }
-            pixels[i]   = UInt8(r.rounded().clamped(to: 0...255))
-            pixels[i+1] = UInt8(g.rounded().clamped(to: 0...255))
-            pixels[i+2] = UInt8(b.rounded().clamped(to: 0...255))
+            pixels[i]   = UInt8((r.isFinite ? r : 0).rounded().clamped(to: 0...255))
+            pixels[i+1] = UInt8((g.isFinite ? g : 0).rounded().clamped(to: 0...255))
+            pixels[i+2] = UInt8((b.isFinite ? b : 0).rounded().clamped(to: 0...255))
         }
 
         // ── Unsharp mask (amount=0.45, threshold=4) ──
