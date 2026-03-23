@@ -490,7 +490,9 @@ class PassportProcessor: NSObject {
         // ── 2. Sigmoid sharpening ──
         for i in 0..<rawMask.count {
             let v = rawMask[i]
-            rawMask[i] = Float(1.0 / (1.0 + exp(Double(-12.0 * (v - 0.45)))))
+            guard v.isFinite else { rawMask[i] = 0; continue }
+            let sigmoid = Float(1.0 / (1.0 + exp(Double(-12.0 * (v - 0.45)))))
+            rawMask[i] = sigmoid.isFinite ? sigmoid : 0
         }
 
         // ── 3. Bilinear upsample mask to image size ──
@@ -548,14 +550,21 @@ class PassportProcessor: NSObject {
                 if dist < 60 { alpha = min(1, alpha * 1.6) }
             }
 
+            // Guard against NaN/infinity from mask processing
+            if !alpha.isFinite { alpha = 0 }
+            alpha = alpha.clamped(to: 0...1)
+
             if alpha >= 0.99 {
                 // fully person — keep
             } else if alpha <= 0.01 {
                 pixels[pi] = 255; pixels[pi+1] = 255; pixels[pi+2] = 255
             } else {
-                pixels[pi]   = UInt8((r * alpha + 255 * (1 - alpha)).clamped(to: 0...255))
-                pixels[pi+1] = UInt8((g * alpha + 255 * (1 - alpha)).clamped(to: 0...255))
-                pixels[pi+2] = UInt8((b * alpha + 255 * (1 - alpha)).clamped(to: 0...255))
+                let br = (r * alpha + 255 * (1 - alpha))
+                let bg = (g * alpha + 255 * (1 - alpha))
+                let bb = (b * alpha + 255 * (1 - alpha))
+                pixels[pi]   = UInt8((br.isFinite ? br : 255).clamped(to: 0...255))
+                pixels[pi+1] = UInt8((bg.isFinite ? bg : 255).clamped(to: 0...255))
+                pixels[pi+2] = UInt8((bb.isFinite ? bb : 255).clamped(to: 0...255))
             }
         }
 
@@ -621,7 +630,7 @@ class PassportProcessor: NSObject {
                     let sy = min(max(y + k - radius, 0), h - 1)
                     v += temp[sy * w + x] * kernel[k]
                 }
-                result[y * w + x] = min(max(v, 0), 1)
+                result[y * w + x] = v.isFinite ? min(max(v, 0), 1) : 0
             }
         }
         return result
