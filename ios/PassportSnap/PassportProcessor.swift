@@ -258,40 +258,56 @@ class PassportProcessor: NSObject {
 
     /// Scans upward from the face bounding box to find where the background begins,
     /// refining the crown estimate. Mirrors Android's refineCrown().
+    ///
+    /// Renders the scan strip into a known RGBA8 context to avoid crashes from
+    /// non-standard CGImage pixel formats (BGRA, compressed, planar) that come
+    /// from the iOS photo library.
     private func refineCrown(cgImage: CGImage,
                               crownEstimate: Int, fy: Int, fh: Int,
                               faceCx: Int, fw: Int, imgW: Int, imgH: Int) -> Int? {
-        guard let dataProvider = cgImage.dataProvider,
-              let data = dataProvider.data,
-              let bytes = CFDataGetBytePtr(data) else { return nil }
-
-        let bpp = cgImage.bitsPerPixel / 8  // bytes per pixel
-        let bpr = cgImage.bytesPerRow
-
-        let bandHw = max(20, fw / 5)
-        let bandL  = max(0, faceCx - bandHw)
-        let bandR  = min(imgW, faceCx + bandHw)
+        let bandHw    = max(20, fw / 5)
+        let bandL     = max(0, faceCx - bandHw)
+        let bandR     = min(imgW, faceCx + bandHw)
+        let bandW     = bandR - bandL
         let maxExtend = Int(Double(fh) * 0.40)
-        let scanStart = min(imgH - 1, fy + Int(Double(fh) * 0.05))
         let scanStop  = max(0, fy - maxExtend)
+        let stripTop  = scanStop
+        let stripH    = max(1, min(imgH, fy + Int(Double(fh) * 0.05)) - stripTop)
 
+        guard bandW > 0, stripH > 0 else { return nil }
+
+        // Render only the scan strip into a known RGBA8 bitmap context
+        var stripPixels = [UInt8](repeating: 0, count: bandW * stripH * 4)
+        guard let ctx = CGContext(
+            data: &stripPixels,
+            width: bandW, height: stripH,
+            bitsPerComponent: 8,
+            bytesPerRow: bandW * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return nil }
+
+        ctx.draw(cgImage,
+                 in: CGRect(x: -bandL, y: -(imgH - stripTop - stripH),
+                            width: imgW, height: imgH))
+
+        let scanStart = min(stripH - 1, fy + Int(Double(fh) * 0.05) - stripTop)
         var scanCrown = crownEstimate
 
-        for y in stride(from: scanStart, through: scanStop, by: -1) {
-            var brightCount = 0; var totalCount = 0
-            for x in bandL..<bandR {
-                let offset = y * bpr + x * bpp
-                let r = Int(bytes[offset])
-                let g = Int(bytes[offset + 1])
-                let b = Int(bytes[offset + 2])
+        for y in stride(from: scanStart, through: 0, by: -1) {
+            var brightCount = 0
+            let rowBase = y * bandW * 4
+            for x in 0..<bandW {
+                let i = rowBase + x * 4
+                let r = Int(stripPixels[i])
+                let g = Int(stripPixels[i + 1])
+                let b = Int(stripPixels[i + 2])
                 let gray = (r + g + b) / 3
                 if gray > 185 { brightCount += 1 }
-                totalCount += 1
             }
-            if totalCount == 0 { break }
-            let brightFrac = Double(brightCount) / Double(totalCount)
+            let brightFrac = Double(brightCount) / Double(bandW)
             if brightFrac > 0.65 {
-                scanCrown = y + 2
+                scanCrown = (y + stripTop) + 2
                 break
             }
         }
