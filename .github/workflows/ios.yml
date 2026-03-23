@@ -25,9 +25,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'npm'
 
       - name: Install Node dependencies
-        run: npm install
+        run: npm ci
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -43,6 +44,15 @@ jobs:
           key: pods-${{ hashFiles('ios/Podfile.lock') }}
           restore-keys: pods-
 
+      - name: Cache Xcode DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ios/build/DerivedData
+          key: derived-${{ hashFiles('ios/Podfile.lock') }}-${{ hashFiles('ios/PassportSnap.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            derived-${{ hashFiles('ios/Podfile.lock') }}-
+            derived-
+
       - name: Install CocoaPods dependencies
         run: |
           cd ios
@@ -50,7 +60,6 @@ jobs:
         env:
           COCOAPODS_DISABLE_STATS: true
 
-      # Install ONLY the certificate — profile is downloaded fresh by Fastlane
       - name: Install Apple Distribution certificate
         env:
           CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
@@ -59,9 +68,7 @@ jobs:
         run: |
           CERT_PATH=$RUNNER_TEMP/cert.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
-
           echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
-
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
@@ -120,5 +127,4 @@ jobs:
 
       - name: Clean up keychain
         if: always()
-        run: |
-          security delete-keychain $RUNNER_TEMP/build.keychain 2>/dev/null || true
+        run: security delete-keychain $RUNNER_TEMP/build.keychain 2>/dev/null || true
