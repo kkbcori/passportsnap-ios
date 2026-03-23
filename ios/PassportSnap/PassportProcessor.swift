@@ -548,42 +548,45 @@ class PassportProcessor: NSObject {
         }
 
         // ── Step 4: Border flood-fill to identify CONNECTED background ──────────
-        // Only pixels reachable from the image border (4-connectivity) that are
-        // classified as background in the trimap are true background.
-        // Interior holes (shirt, collar) are NOT reachable from border → stay person.
+        // Seed from BOTH definite-bg (trimap=0) AND uncertain (trimap=2) border pixels.
+        // Beige/grey walls score ~0.4-0.55 in the ML mask → trimap=2 (uncertain).
+        // Without seeding uncertain border pixels, the flood never starts for such photos.
+        // Flood through: trimap=0 (definite bg) OR trimap=2 (uncertain, not definite fg).
+        // Interior uncertain pixels not reachable from border → treated as foreground.
         var bgMask = [Bool](repeating: false, count: w * h)
         var queue = [Int]()
         queue.reserveCapacity(w * 2 + h * 2)
 
-        // Seed: all border pixels that are definitively background
-        func seedIfBg(_ idx: Int) {
-            if trimap[idx] == 0 { bgMask[idx] = true; queue.append(idx) }
+        // Seed: all border pixels that are NOT definite foreground
+        func seedIfNotFg(_ idx: Int) {
+            if trimap[idx] != 1 && !bgMask[idx] { bgMask[idx] = true; queue.append(idx) }
         }
-        for x in 0..<w { seedIfBg(x); seedIfBg((h-1)*w+x) }
-        for y in 1..<(h-1) { seedIfBg(y*w); seedIfBg(y*w+w-1) }
+        for x in 0..<w { seedIfNotFg(x); seedIfNotFg((h-1)*w+x) }
+        for y in 1..<(h-1) { seedIfNotFg(y*w); seedIfNotFg(y*w+w-1) }
 
-        // BFS flood fill — 4-connected, only through background trimap pixels
+        // BFS flood fill — 4-connected, through non-foreground pixels only
         var qi = 0
         while qi < queue.count {
             let idx = queue[qi]; qi += 1
             let x = idx % w; let y = idx / w
             let neighbours = [
-                y > 0     ? idx - w : -1,
-                y < h-1   ? idx + w : -1,
-                x > 0     ? idx - 1 : -1,
-                x < w-1   ? idx + 1 : -1
+                y > 0   ? idx - w : -1,
+                y < h-1 ? idx + w : -1,
+                x > 0   ? idx - 1 : -1,
+                x < w-1 ? idx + 1 : -1
             ]
             for n in neighbours {
-                guard n >= 0, !bgMask[n], trimap[n] == 0 else { continue }
+                guard n >= 0, !bgMask[n], trimap[n] != 1 else { continue }
                 bgMask[n] = true
                 queue.append(n)
             }
         }
 
-        // ── Step 5: Force all non-border-connected background to foreground ──────
-        // Any background pixel NOT reached by flood-fill = interior hole → fill it
+        // ── Step 5: Classify flood results ─────────────────────────────────────
+        // bgMask=true  → confirmed background (border-connected non-fg region)
+        // bgMask=false AND trimap!=1 → interior hole → force to foreground
         for i in 0..<(w*h) {
-            if trimap[i] == 0 && !bgMask[i] { trimap[i] = 1 }
+            if trimap[i] != 1 && !bgMask[i] { trimap[i] = 1 }  // interior hole → person
         }
 
         // ── Step 6: Soft alpha at edge zone using Gaussian-blurred mask ──────────
@@ -595,9 +598,14 @@ class PassportProcessor: NSObject {
         // Definite bg → 0 (white), definite fg → 1 (keep), edge → smooth alpha
         var finalAlpha = [Float](repeating: 1, count: w * h)
         for i in 0..<(w*h) {
+            if bgMask[i] {
+                // border-connected background → white
+                finalAlpha[i] = 0.0
+                continue
+            }
             switch trimap[i] {
             case 1: finalAlpha[i] = 1.0                             // confirmed person
-            case 0: finalAlpha[i] = bgMask[i] ? 0.0 : 1.0          // bg: only border-connected
+            case 0: finalAlpha[i] = 1.0                             // interior hole already fixed
             default:                                                  // edge zone
                 let a = smoothMask[i].clamped(to: 0...1)
                 finalAlpha[i] = a.isFinite ? a : 1.0
