@@ -243,14 +243,26 @@ class PassportProcessor: NSObject {
                           userInfo: [NSLocalizedDescriptionKey: "Face detection timed out"])
         }
 
-        // Refine crown by scanning upward
+        // Refine crown by scanning upward for bright background.
+        // Only trust the result if it is clearly ABOVE the face bounding box top.
+        // Light-skinned foreheads are bright (>185) so the scan can stop immediately
+        // inside the face box — in that case fall back to a hairMult estimate.
+        let hairMultFallback = 1.12
+        let fallbackCrownY   = max(0, fd.fy - Int(Double(fd.fh) * (hairMultFallback - 1.0)))
         if let refined = refineCrown(cgImage: cgImage,
                                      crownEstimate: fd.crownY,
                                      fy: fd.fy, fh: fd.fh,
                                      faceCx: fd.faceCx, fw: fd.fw,
                                      imgW: w, imgH: h) {
+            // Accept only if scan found something meaningfully above fy
+            // (at least 8% of face height above the face bounding box top).
+            let minAcceptableCrown = fd.fy - Int(Double(fd.fh) * 0.08)
+            let trustedCrown = refined < minAcceptableCrown ? refined : fallbackCrownY
             fd = FaceData(fx: fd.fx, fy: fd.fy, fw: fd.fw, fh: fd.fh,
-                          eyeY: fd.eyeY, crownY: refined, chinY: fd.chinY, faceCx: fd.faceCx)
+                          eyeY: fd.eyeY, crownY: trustedCrown, chinY: fd.chinY, faceCx: fd.faceCx)
+        } else {
+            fd = FaceData(fx: fd.fx, fy: fd.fy, fw: fd.fw, fh: fd.fh,
+                          eyeY: fd.eyeY, crownY: fallbackCrownY, chinY: fd.chinY, faceCx: fd.faceCx)
         }
 
         return fd
@@ -959,15 +971,14 @@ class PassportProcessor: NSObject {
                     )
                 }
 
-                // 6. Mild sharpening only — skip gamma/stretch which alters skin tone
-                bmp = self.mildSharpen(bmp)
+                // 6. No image processing — preserve original colours exactly
 
                 // 7. Background removal
                 bmp = self.whitenBackground(image: bmp, face: origFace)
 
-                // 8. Force headroom white
+                // 8. Skip forceHeadroomWhite — segmentation already handles background.
+                // The flood-fill was causing white patches on light-skin foreheads.
                 let spec = self.getSpec(country)
-                bmp = self.forceHeadroomWhite(bmp, crownTopFrac: Float(spec.crownTopFrac))
 
                 // 9. Pad with white
                 let origW = Int(bmp.size.width); let origH = Int(bmp.size.height)
