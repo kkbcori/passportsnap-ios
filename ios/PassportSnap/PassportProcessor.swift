@@ -554,6 +554,23 @@ class PassportProcessor: NSObject {
         let blurRadius = max(2, min(w, h) / 300)
         mask = gaussianBlurMask(mask, w: w, h: h, radius: blurRadius)
 
+        // ── 4b. Fill interior mask holes ──
+        // Sample a ring of 8 neighbours; if avg neighbour alpha is high but
+        // this pixel is low, lift it. Handles shirt/collar holes in ML mask.
+        let step = max(1, min(w, h) / 400)
+        for y in step..<(h - step) {
+            for x in step..<(w - step) {
+                let idx = y * w + x
+                if mask[idx] >= 0.35 { continue }
+                let neighbourAvg = (
+                    mask[(y-step)*w + (x-step)] + mask[(y-step)*w + x] + mask[(y-step)*w + (x+step)] +
+                    mask[y*w + (x-step)]                                + mask[y*w + (x+step)] +
+                    mask[(y+step)*w + (x-step)] + mask[(y+step)*w + x] + mask[(y+step)*w + (x+step)]
+                ) / 8.0
+                if neighbourAvg > 0.70 { mask[idx] = neighbourAvg * 0.85 }
+            }
+        }
+
         // ── 5. Sample skin colour ──
         var pixels = extractPixels(cgImage)
         let faceCx = max(0, min(face.faceCx, w - 1))
@@ -575,14 +592,11 @@ class PassportProcessor: NSObject {
             let pi = idx * 4
             let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
 
-            // In transition zone: protect hair (dark) and skin tones
-            if alpha > 0.05 && alpha < 0.85 {
+            // Gentle edge refinement only: protect very dark pixels (hair edges)
+            // from being whitened. Keep multiplier conservative to avoid mask expansion.
+            if alpha > 0.05 && alpha < 0.50 {
                 let lum = r * 0.299 + g * 0.587 + b * 0.114
-                if      lum < 80  { alpha = min(1, alpha * 1.8) }
-                else if lum < 120 { alpha = min(1, alpha * 1.4) }
-                let dsR = r - skinR; let dsG = g - skinG; let dsB = b - skinB
-                let dist = sqrt(dsR*dsR + dsG*dsG + dsB*dsB)
-                if dist < 60 { alpha = min(1, alpha * 1.6) }
+                if lum < 60 { alpha = min(1, alpha * 1.3) }  // dark hair — lean toward keeping
             }
 
             // Guard against NaN/infinity — treat as fully person (keep pixel)
@@ -607,16 +621,23 @@ class PassportProcessor: NSObject {
             return whitenBackgroundToneCurve(image: image)
         }
 
-        // Sanity check: if >75% of pixels are near-white the segmentation failed.
-        // Fall back to gentle tone-curve approach to avoid returning a blank image.
-        var whiteCount = 0
-        let total = w * h
-        for idx in stride(from: 0, to: pixels.count - 2, by: 4) {
-            if pixels[idx] > 240 && pixels[idx+1] > 240 && pixels[idx+2] > 240 {
-                whiteCount += 1
+        // Sanity check: only check the FACE CENTRE zone for white pixels.
+        // Checking the whole image causes false positives — a successful grey-bg
+        // removal will have lots of white pixels (the converted background).
+        // If the face centre is mostly white, the mask failed.
+        let zoneX1 = max(0, face.fx + face.fw / 4)
+        let zoneX2 = min(w, face.fx + face.fw * 3 / 4)
+        let zoneY1 = max(0, face.fy + face.fh / 4)
+        let zoneY2 = min(h, face.fy + face.fh * 3 / 4)
+        var faceWhite = 0; var faceTotal = 0
+        for fy2 in zoneY1..<zoneY2 {
+            for fx2 in zoneX1..<zoneX2 {
+                let i = (fy2 * w + fx2) * 4
+                if pixels[i] > 240 && pixels[i+1] > 240 && pixels[i+2] > 240 { faceWhite += 1 }
+                faceTotal += 1
             }
         }
-        if whiteCount > total * 3 / 5 {
+        if faceTotal > 0 && faceWhite * 100 / faceTotal > 40 {
             return whitenBackgroundToneCurve(image: image)
         }
         return result
