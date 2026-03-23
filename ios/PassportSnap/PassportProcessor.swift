@@ -252,19 +252,21 @@ class PassportProcessor: NSObject {
         // Only trust the result if it is clearly ABOVE the face bounding box top.
         // Light-skinned foreheads are bright (>185) so the scan can stop immediately
         // inside the face box — in that case fall back to a hairMult estimate.
-        // Fallback: Vision bounding box top (fy) ≈ hairline.
-        // Add 20% of face height above fy to estimate top of hair.
-        let fallbackCrownY = max(0, fd.fy - Int(Double(fd.fh) * 0.20))
-        // Use the pixel-scan result only if it found background clearly above fy.
-        // Otherwise use the hairMult estimate (20% above Vision bounding box top).
+        // Vision fy ≈ top of forehead / hairline — already a good crown estimate.
+        // Using fy directly avoids overestimating hair height which caused the
+        // head to appear above the green overlay line.
+        let fallbackCrownY = fd.fy
+        // Use pixel-scan crown only if it found background clearly ABOVE fy.
+        // If scan result is at or below fy, it hit skin/hair not background — use fy.
         let refinedCrownY: Int
         if let refined = refineCrown(cgImage: cgImage,
                                      crownEstimate: fd.crownY,
                                      fy: fd.fy, fh: fd.fh,
                                      faceCx: fd.faceCx, fw: fd.fw,
                                      imgW: w, imgH: h),
-           refined < fd.fy - Int(Double(fd.fh) * 0.06) {
-            refinedCrownY = refined
+           refined < fd.fy {
+            // Clamp: don't go more than 30% of fh above fy (avoids runaway estimates)
+            refinedCrownY = max(fd.fy - Int(Double(fd.fh) * 0.30), refined)
         } else {
             refinedCrownY = fallbackCrownY
         }
@@ -468,10 +470,11 @@ class PassportProcessor: NSObject {
 
     // MARK: ── Background Removal ──────────────────────────────────────────
 
-    /// Background lightening using CIToneCurve — reliable across all iOS versions.
-    /// VNGeneratePersonSegmentationRequest was producing NaN masks and over-whitening
-    /// on iOS 26 devices, so we use the tone-curve approach for all versions.
+    /// Background removal: uses ML segmentation (iOS 15+) with tone-curve fallback.
     private func whitenBackground(image: UIImage, face: FaceData) -> UIImage {
+        if #available(iOS 15.0, *) {
+            return whitenBackgroundSegmentation(image: image, face: face)
+        }
         return whitenBackgroundToneCurve(image: image)
     }
 
@@ -613,74 +616,83 @@ class PassportProcessor: NSObject {
                 whiteCount += 1
             }
         }
-        if whiteCount > total * 3 / 4 {
+        if whiteCount > total * 3 / 5 {
             return whitenBackgroundToneCurve(image: image)
         }
         return result
     }
 
-    /// Fallback for iOS 13/14: CIToneCurve pulls highlights to white.
-    /// Lifts near-white background pixels to pure white while preserving
-    /// skin/hair tones. More aggressive highlight pull than the previous version.
+    /// Fallback background cleanup — used only when ML segmentation is unavailable
+    /// or produced a bad result. Operates purely at pixel level: only pixels that
+    /// are already near-white AND achromatic (background) are pushed to pure white.
+    /// All other pixels (face, skin, hair, clothing) are left COMPLETELY UNTOUCHED.
     private func whitenBackgroundToneCurve(image: UIImage) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
-        var ci = CIImage(cgImage: cgImage)
-        // Tone curve: only pull very bright near-white highlights to pure white.
-        // Shadows and midtones (face, hair, skin) are completely untouched.
-        //   0.00 → 0.00  black unchanged
-        //   0.50 → 0.50  midtones unchanged
-        //   0.75 → 0.80  upper-mid slightly lifted
-        //   0.88 → 0.96  near-white background strongly → white
-        //   1.00 → 1.00  white stays white
-        if let f = CIFilter(name: "CIToneCurve") {
-            f.setValue(ci, forKey: kCIInputImageKey)
-            f.setValue(CIVector(x: 0.00, y: 0.00), forKey: "inputPoint0")
-            f.setValue(CIVector(x: 0.50, y: 0.50), forKey: "inputPoint1")
-            f.setValue(CIVector(x: 0.75, y: 0.80), forKey: "inputPoint2")
-            f.setValue(CIVector(x: 0.88, y: 0.96), forKey: "inputPoint3")
-            f.setValue(CIVector(x: 1.00, y: 1.00), forKey: "inputPoint4")
-            if let out = f.outputImage { ci = out }
+        var pixels = extractPixels(cgImage)
+        guard !pixels.isEmpty else { return image }
+        let w = cgImage.width; let h = cgImage.height
+
+        for i in stride(from: 0, to: pixels.count - 2, by: 4) {
+            let r = Int(pixels[i]); let g = Int(pixels[i+1]); let b = Int(pixels[i+2])
+            let brightness = (r + g + b) / 3
+            let maxC = max(r, max(g, b))
+            let minC = min(r, min(g, b))
+            let sat = maxC > 0 ? (maxC - minC) * 255 / maxC : 0
+            // Only touch very bright, nearly achromatic pixels — i.e. background.
+            // Threshold: brightness > 220 AND saturation < 20.
+            // This leaves skin (warm, saturated) and hair (dark) completely alone.
+            if brightness > 220 && sat < 20 {
+                pixels[i] = 255; pixels[i+1] = 255; pixels[i+2] = 255
+            }
+            // All other pixels: no change whatsoever
         }
-        guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return image }
-        return UIImage(cgImage: cg)
+
+        return rebuildImage(pixels: pixels, width: w, height: h) ?? image
     }
 
-    /// Returns true if the image background is already near-white.
-    /// Samples the top, left, right borders (avoids face area in centre).
+    /// Returns true only if the background is genuinely pure white (studio white).
+    /// Samples borders; requires both very high brightness AND very low saturation.
+    /// This prevents cream walls, beige rooms, or bright indoor scenes from
+    /// skipping background removal.
     private func hasWhiteBackground(_ image: UIImage) -> Bool {
         guard let cgImage = image.cgImage else { return false }
         let w = cgImage.width; let h = cgImage.height
         guard w > 10, h > 10 else { return false }
         var pixels = extractPixels(cgImage)
         guard !pixels.isEmpty else { return false }
-        var sampleSum = 0; var sampleCount = 0
-        // Top 10% of image
-        let topRows = max(1, h / 10)
+
+        var brightAndNeutralCount = 0
+        var sampleCount = 0
+
+        func sample(_ i: Int) {
+            let r = Int(pixels[i]); let g = Int(pixels[i+1]); let b = Int(pixels[i+2])
+            let brightness = (r + g + b) / 3
+            let maxC = max(r, max(g, b))
+            let minC = min(r, min(g, b))
+            // Saturation in 0–255 scale
+            let sat = maxC > 0 ? (maxC - minC) * 255 / maxC : 0
+            // Pure white: very bright AND nearly achromatic
+            if brightness > 245 && sat < 12 { brightAndNeutralCount += 1 }
+            sampleCount += 1
+        }
+
+        // Top 8% of image
+        let topRows = max(1, h / 12)
         for y in 0..<topRows {
             for x in stride(from: 0, to: w, by: max(1, w / 20)) {
-                let i = (y * w + x) * 4
-                sampleSum += Int(pixels[i]) + Int(pixels[i+1]) + Int(pixels[i+2])
-                sampleCount += 3
+                sample((y * w + x) * 4)
             }
         }
-        // Left and right 8% strips (top half only — avoids clothing)
-        let stripW = max(1, w / 12)
+        // Left and right 7% strips (top half only)
+        let stripW = max(1, w / 14)
         for y in stride(from: 0, to: h / 2, by: max(1, h / 30)) {
-            for x in 0..<stripW {
-                let il = (y * w + x) * 4
-                sampleSum += Int(pixels[il]) + Int(pixels[il+1]) + Int(pixels[il+2])
-                sampleCount += 3
-            }
-            for x in (w - stripW)..<w {
-                let ir = (y * w + x) * 4
-                sampleSum += Int(pixels[ir]) + Int(pixels[ir+1]) + Int(pixels[ir+2])
-                sampleCount += 3
-            }
+            for x in 0..<stripW { sample((y * w + x) * 4) }
+            for x in (w - stripW)..<w { sample((y * w + x) * 4) }
         }
+
         guard sampleCount > 0 else { return false }
-        let meanBrightness = sampleSum / sampleCount
-        // >235 average = already white background
-        return meanBrightness > 235
+        // Only skip removal if ≥90% of sampled border pixels are pure white
+        return Double(brightAndNeutralCount) / Double(sampleCount) >= 0.90
     }
 
     /// Separable Gaussian blur on a Float mask (mirrors Android's gaussianBlurMask).
