@@ -483,7 +483,7 @@ class PassportProcessor: NSObject {
         guard let cgImage = image.cgImage else { return image }
         let w = cgImage.width; let h = cgImage.height
 
-        // ── 1. Run person segmentation ──
+        // ── Step 1: Run Apple ML segmentation ──────────────────────────────────
         var maskPixels: [Float]?
         var maskW = 0; var maskH = 0
         let semaphore = DispatchSemaphore(value: 0)
@@ -498,39 +498,26 @@ class PassportProcessor: NSObject {
             maskH = CVPixelBufferGetHeight(buf)
             guard let base = CVPixelBufferGetBaseAddress(buf) else { return }
             let ptr = base.assumingMemoryBound(to: Float32.self)
-            // CVPixelBuffer rows may have padding (bytesPerRow >= maskW * 4).
-            // Reading maskW*maskH floats without stride causes SIGSEGV on real devices.
             let bytesPerRow  = CVPixelBufferGetBytesPerRow(buf)
             let floatsPerRow = bytesPerRow / MemoryLayout<Float32>.size
             var flat = [Float](repeating: 0, count: maskW * maskH)
             for row in 0..<maskH {
                 let src = ptr.advanced(by: row * floatsPerRow)
                 let base2 = row * maskW
-                for col in 0..<maskW {
-                    flat[base2 + col] = src[col]
-                }
+                for col in 0..<maskW { flat[base2 + col] = src[col] }
             }
             maskPixels = flat
         }
         request.qualityLevel = .accurate
-
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         try? handler.perform([request])
         semaphore.wait()
 
-        guard var rawMask = maskPixels, maskW > 0, maskH > 0 else {
+        guard let rawMask = maskPixels, maskW > 0, maskH > 0 else {
             return whitenBackgroundToneCurve(image: image)
         }
 
-        // ── 2. Sigmoid sharpening ──
-        for i in 0..<rawMask.count {
-            let v = rawMask[i]
-            guard v.isFinite else { rawMask[i] = 1; continue }
-            let sigmoid = Float(1.0 / (1.0 + exp(Double(-12.0 * (v - 0.45)))))
-            rawMask[i] = sigmoid.isFinite ? sigmoid : 0
-        }
-
-        // ── 3. Bilinear upsample mask to image size ──
+        // ── Step 2: Bilinear upsample to full image size ────────────────────────
         var mask = [Float](repeating: 0, count: w * h)
         let scaleX = Float(maskW - 1) / Float(max(w - 1, 1))
         let scaleY = Float(maskH - 1) / Float(max(h - 1, 1))
@@ -540,99 +527,121 @@ class PassportProcessor: NSObject {
                 let srcY = Float(y) * scaleY
                 let x0 = min(Int(srcX), maskW - 2)
                 let y0 = min(Int(srcY), maskH - 2)
-                let fx = srcX - Float(x0); let fy = srcY - Float(y0)
-                mask[y * w + x] = (
-                    rawMask[y0 * maskW + x0]     * (1 - fx) * (1 - fy) +
-                    rawMask[y0 * maskW + x0 + 1] * fx       * (1 - fy) +
-                    rawMask[(y0+1) * maskW + x0] * (1 - fx) * fy +
-                    rawMask[(y0+1) * maskW + x0 + 1] * fx   * fy
-                )
+                let fx = srcX - Float(x0); let fy2 = srcY - Float(y0)
+                let v = rawMask[y0*maskW+x0]*(1-fx)*(1-fy2) +
+                        rawMask[y0*maskW+x0+1]*fx*(1-fy2) +
+                        rawMask[(y0+1)*maskW+x0]*(1-fx)*fy2 +
+                        rawMask[(y0+1)*maskW+x0+1]*fx*fy2
+                mask[y*w+x] = v.isFinite ? v : 0
             }
         }
 
-        // ── 4. Gaussian blur (radius ≈ max(2, minDim/300)) ──
-        let blurRadius = max(2, min(w, h) / 300)
-        mask = gaussianBlurMask(mask, w: w, h: h, radius: blurRadius)
+        // ── Step 3: Threshold to binary trimap ─────────────────────────────────
+        // definite_fg >= 0.65, definite_bg <= 0.35, edge zone in between
+        let FG_THRESH: Float = 0.65
+        let BG_THRESH: Float = 0.35
+        // 0 = background, 1 = foreground, 2 = uncertain edge
+        var trimap = [UInt8](repeating: 2, count: w * h)
+        for i in 0..<(w*h) {
+            if mask[i] >= FG_THRESH { trimap[i] = 1 }
+            else if mask[i] <= BG_THRESH { trimap[i] = 0 }
+        }
 
-        // ── 4b. Fill interior mask holes ──
-        // Sample a ring of 8 neighbours; if avg neighbour alpha is high but
-        // this pixel is low, lift it. Handles shirt/collar holes in ML mask.
-        let step = max(1, min(w, h) / 400)
-        for y in step..<(h - step) {
-            for x in step..<(w - step) {
-                let idx = y * w + x
-                if mask[idx] >= 0.35 { continue }
-                let neighbourAvg = (
-                    mask[(y-step)*w + (x-step)] + mask[(y-step)*w + x] + mask[(y-step)*w + (x+step)] +
-                    mask[y*w + (x-step)]                                + mask[y*w + (x+step)] +
-                    mask[(y+step)*w + (x-step)] + mask[(y+step)*w + x] + mask[(y+step)*w + (x+step)]
-                ) / 8.0
-                if neighbourAvg > 0.70 { mask[idx] = neighbourAvg * 0.85 }
+        // ── Step 4: Border flood-fill to identify CONNECTED background ──────────
+        // Only pixels reachable from the image border (4-connectivity) that are
+        // classified as background in the trimap are true background.
+        // Interior holes (shirt, collar) are NOT reachable from border → stay person.
+        var bgMask = [Bool](repeating: false, count: w * h)
+        var queue = [Int]()
+        queue.reserveCapacity(w * 2 + h * 2)
+
+        // Seed: all border pixels that are definitively background
+        func seedIfBg(_ idx: Int) {
+            if trimap[idx] == 0 { bgMask[idx] = true; queue.append(idx) }
+        }
+        for x in 0..<w { seedIfBg(x); seedIfBg((h-1)*w+x) }
+        for y in 1..<(h-1) { seedIfBg(y*w); seedIfBg(y*w+w-1) }
+
+        // BFS flood fill — 4-connected, only through background trimap pixels
+        var qi = 0
+        while qi < queue.count {
+            let idx = queue[qi]; qi += 1
+            let x = idx % w; let y = idx / w
+            let neighbours = [
+                y > 0     ? idx - w : -1,
+                y < h-1   ? idx + w : -1,
+                x > 0     ? idx - 1 : -1,
+                x < w-1   ? idx + 1 : -1
+            ]
+            for n in neighbours {
+                guard n >= 0, !bgMask[n], trimap[n] == 0 else { continue }
+                bgMask[n] = true
+                queue.append(n)
             }
         }
 
-        // ── 5. Sample skin colour ──
+        // ── Step 5: Force all non-border-connected background to foreground ──────
+        // Any background pixel NOT reached by flood-fill = interior hole → fill it
+        for i in 0..<(w*h) {
+            if trimap[i] == 0 && !bgMask[i] { trimap[i] = 1 }
+        }
+
+        // ── Step 6: Soft alpha at edge zone using Gaussian-blurred mask ──────────
+        // Blur just the edge band to get smooth anti-aliased transitions
+        let blurRadius = max(2, min(w, h) / 250)
+        let smoothMask = gaussianBlurMask(mask, w: w, h: h, radius: blurRadius)
+
+        // ── Step 7: Build final alpha ───────────────────────────────────────────
+        // Definite bg → 0 (white), definite fg → 1 (keep), edge → smooth alpha
+        var finalAlpha = [Float](repeating: 1, count: w * h)
+        for i in 0..<(w*h) {
+            switch trimap[i] {
+            case 1: finalAlpha[i] = 1.0                             // confirmed person
+            case 0: finalAlpha[i] = bgMask[i] ? 0.0 : 1.0          // bg: only border-connected
+            default:                                                  // edge zone
+                let a = smoothMask[i].clamped(to: 0...1)
+                finalAlpha[i] = a.isFinite ? a : 1.0
+            }
+        }
+
+        // ── Step 8: Edge refinement — dark hair pixels near edges ──────────────
+        // Hair edges are often under-detected by the ML model.
+        // In the edge zone, if a pixel is very dark it is more likely hair than bg.
         var pixels = extractPixels(cgImage)
-        let faceCx = max(0, min(face.faceCx, w - 1))
-        let faceCy = max(0, min(face.fy + face.fh / 2, h - 1))
-        let skinR2 = max(5, face.fw / 6)
-        var skinR: Float = 0; var skinG: Float = 0; var skinB: Float = 0; var skinN = 0
-        for sy in max(0, faceCy - skinR2)...min(h-1, faceCy + skinR2) {
-            for sx in max(0, faceCx - skinR2)...min(w-1, faceCx + skinR2) {
-                let i = (sy * w + sx) * 4
-                skinR += Float(pixels[i]); skinG += Float(pixels[i+1]); skinB += Float(pixels[i+2])
-                skinN += 1
-            }
-        }
-        if skinN > 0 { skinR /= Float(skinN); skinG /= Float(skinN); skinB /= Float(skinN) }
-
-        // ── 6. Alpha blend with colour-aware refinement ──
-        for idx in 0..<(w * h) {
-            var alpha = mask[idx]
-            let pi = idx * 4
+        for i in 0..<(w*h) {
+            guard trimap[i] == 2 else { continue }      // only touch uncertain edge zone
+            let pi = i * 4
             let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
+            let lum = r * 0.299 + g * 0.587 + b * 0.114
+            // Very dark pixels in edge zone are almost certainly hair → keep
+            if lum < 50 { finalAlpha[i] = min(1, finalAlpha[i] * 1.4) }
+        }
 
-            // Gentle edge refinement only: protect very dark pixels (hair edges)
-            // from being whitened. Keep multiplier conservative to avoid mask expansion.
-            if alpha > 0.05 && alpha < 0.50 {
-                let lum = r * 0.299 + g * 0.587 + b * 0.114
-                if lum < 60 { alpha = min(1, alpha * 1.3) }  // dark hair — lean toward keeping
-            }
-
-            // Guard against NaN/infinity — treat as fully person (keep pixel)
-            if !alpha.isFinite { alpha = 1 }
-            alpha = alpha.clamped(to: 0...1)
-
-            if alpha >= 0.99 {
-                // fully person — keep
-            } else if alpha <= 0.01 {
+        // ── Step 9: Composite onto pure white ──────────────────────────────────
+        for i in 0..<(w*h) {
+            let alpha = finalAlpha[i].clamped(to: 0...1)
+            let pi = i * 4
+            if alpha >= 0.995 {
+                // fully person — untouched
+            } else if alpha <= 0.005 {
                 pixels[pi] = 255; pixels[pi+1] = 255; pixels[pi+2] = 255
             } else {
-                let br = (r * alpha + 255 * (1 - alpha))
-                let bg = (g * alpha + 255 * (1 - alpha))
-                let bb = (b * alpha + 255 * (1 - alpha))
-                pixels[pi]   = UInt8((br.isFinite ? br : 255).clamped(to: 0...255))
-                pixels[pi+1] = UInt8((bg.isFinite ? bg : 255).clamped(to: 0...255))
-                pixels[pi+2] = UInt8((bb.isFinite ? bb : 255).clamped(to: 0...255))
+                let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
+                pixels[pi]   = UInt8(((r * alpha + 255 * (1-alpha)).clamped(to: 0...255)))
+                pixels[pi+1] = UInt8(((g * alpha + 255 * (1-alpha)).clamped(to: 0...255)))
+                pixels[pi+2] = UInt8(((b * alpha + 255 * (1-alpha)).clamped(to: 0...255)))
             }
         }
 
-        guard let result = rebuildImage(pixels: pixels, width: w, height: h) else {
-            return whitenBackgroundToneCurve(image: image)
-        }
-
-        // Sanity check: only check the FACE CENTRE zone for white pixels.
-        // Checking the whole image causes false positives — a successful grey-bg
-        // removal will have lots of white pixels (the converted background).
-        // If the face centre is mostly white, the mask failed.
+        // ── Step 10: Sanity check — face centre must not be white ───────────────
         let zoneX1 = max(0, face.fx + face.fw / 4)
         let zoneX2 = min(w, face.fx + face.fw * 3 / 4)
         let zoneY1 = max(0, face.fy + face.fh / 4)
         let zoneY2 = min(h, face.fy + face.fh * 3 / 4)
         var faceWhite = 0; var faceTotal = 0
-        for fy2 in zoneY1..<zoneY2 {
-            for fx2 in zoneX1..<zoneX2 {
-                let i = (fy2 * w + fx2) * 4
+        for fy3 in zoneY1..<zoneY2 {
+            for fx3 in zoneX1..<zoneX2 {
+                let i = (fy3 * w + fx3) * 4
                 if pixels[i] > 240 && pixels[i+1] > 240 && pixels[i+2] > 240 { faceWhite += 1 }
                 faceTotal += 1
             }
@@ -640,7 +649,8 @@ class PassportProcessor: NSObject {
         if faceTotal > 0 && faceWhite * 100 / faceTotal > 40 {
             return whitenBackgroundToneCurve(image: image)
         }
-        return result
+
+        return rebuildImage(pixels: pixels, width: w, height: h) ?? whitenBackgroundToneCurve(image: image)
     }
 
     /// Fallback background cleanup — used only when ML segmentation is unavailable
