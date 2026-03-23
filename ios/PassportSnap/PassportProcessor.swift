@@ -307,18 +307,24 @@ class PassportProcessor: NSObject {
         var scanCrown = crownEstimate
 
         for y in stride(from: scanStart, through: 0, by: -1) {
-            var brightCount = 0
+            var bgCount = 0
             let rowBase = y * bandW * 4
             for x in 0..<bandW {
                 let i = rowBase + x * 4
-                let r = Int(stripPixels[i])
-                let g = Int(stripPixels[i + 1])
-                let b = Int(stripPixels[i + 2])
-                let gray = (r + g + b) / 3
-                if gray > 185 { brightCount += 1 }
+                let r = Float(stripPixels[i])
+                let g = Float(stripPixels[i + 1])
+                let b = Float(stripPixels[i + 2])
+                let brightness = (r + g + b) / 3.0
+                // Background detection: very bright AND nearly achromatic (low saturation)
+                // This distinguishes white/grey background from warm-toned bald scalp
+                let maxC = max(r, g, b)
+                let minC = min(r, g, b)
+                let sat = maxC > 0 ? (maxC - minC) / maxC : 0
+                let isBackground = brightness > 220 && sat < 0.08
+                if isBackground { bgCount += 1 }
             }
-            let brightFrac = Double(brightCount) / Double(bandW)
-            if brightFrac > 0.65 {
+            let bgFrac = Double(bgCount) / Double(bandW)
+            if bgFrac > 0.70 {
                 scanCrown = (y + stripTop) + 2
                 break
             }
@@ -613,33 +619,62 @@ class PassportProcessor: NSObject {
     private func whitenBackgroundToneCurve(image: UIImage) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
         var ci = CIImage(cgImage: cgImage)
-
-        // Step 1: mild brightness lift + slight contrast
-        if let f = CIFilter(name: "CIColorControls") {
-            f.setValue(ci, forKey: kCIInputImageKey)
-            f.setValue(0.10, forKey: kCIInputBrightnessKey)
-            f.setValue(1.05, forKey: kCIInputContrastKey)
-            if let out = f.outputImage { ci = out }
-        }
-
-        // Step 2: aggressive tone curve — shadow/midtone intact, highlights → white
-        //   0.00 → 0.00  (black stays black)
-        //   0.25 → 0.23  (shadows almost unchanged)
-        //   0.50 → 0.50  (midtones neutral)
-        //   0.78 → 0.93  (upper highlights strongly pulled toward white)
-        //   1.00 → 1.00  (white stays white)
+        // Tone curve: only pull very bright near-white highlights to pure white.
+        // Shadows and midtones (face, hair, skin) are completely untouched.
+        //   0.00 → 0.00  black unchanged
+        //   0.50 → 0.50  midtones unchanged
+        //   0.75 → 0.80  upper-mid slightly lifted
+        //   0.88 → 0.96  near-white background strongly → white
+        //   1.00 → 1.00  white stays white
         if let f = CIFilter(name: "CIToneCurve") {
             f.setValue(ci, forKey: kCIInputImageKey)
             f.setValue(CIVector(x: 0.00, y: 0.00), forKey: "inputPoint0")
-            f.setValue(CIVector(x: 0.25, y: 0.23), forKey: "inputPoint1")
-            f.setValue(CIVector(x: 0.50, y: 0.50), forKey: "inputPoint2")
-            f.setValue(CIVector(x: 0.78, y: 0.93), forKey: "inputPoint3")
+            f.setValue(CIVector(x: 0.50, y: 0.50), forKey: "inputPoint1")
+            f.setValue(CIVector(x: 0.75, y: 0.80), forKey: "inputPoint2")
+            f.setValue(CIVector(x: 0.88, y: 0.96), forKey: "inputPoint3")
             f.setValue(CIVector(x: 1.00, y: 1.00), forKey: "inputPoint4")
             if let out = f.outputImage { ci = out }
         }
-
         guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return image }
         return UIImage(cgImage: cg)
+    }
+
+    /// Returns true if the image background is already near-white.
+    /// Samples the top, left, right borders (avoids face area in centre).
+    private func hasWhiteBackground(_ image: UIImage) -> Bool {
+        guard let cgImage = image.cgImage else { return false }
+        let w = cgImage.width; let h = cgImage.height
+        guard w > 10, h > 10 else { return false }
+        var pixels = extractPixels(cgImage)
+        guard !pixels.isEmpty else { return false }
+        var sampleSum = 0; var sampleCount = 0
+        // Top 10% of image
+        let topRows = max(1, h / 10)
+        for y in 0..<topRows {
+            for x in stride(from: 0, to: w, by: max(1, w / 20)) {
+                let i = (y * w + x) * 4
+                sampleSum += Int(pixels[i]) + Int(pixels[i+1]) + Int(pixels[i+2])
+                sampleCount += 3
+            }
+        }
+        // Left and right 8% strips (top half only — avoids clothing)
+        let stripW = max(1, w / 12)
+        for y in stride(from: 0, to: h / 2, by: max(1, h / 30)) {
+            for x in 0..<stripW {
+                let il = (y * w + x) * 4
+                sampleSum += Int(pixels[il]) + Int(pixels[il+1]) + Int(pixels[il+2])
+                sampleCount += 3
+            }
+            for x in (w - stripW)..<w {
+                let ir = (y * w + x) * 4
+                sampleSum += Int(pixels[ir]) + Int(pixels[ir+1]) + Int(pixels[ir+2])
+                sampleCount += 3
+            }
+        }
+        guard sampleCount > 0 else { return false }
+        let meanBrightness = sampleSum / sampleCount
+        // >235 average = already white background
+        return meanBrightness > 235
     }
 
     /// Separable Gaussian blur on a Float mask (mirrors Android's gaussianBlurMask).
@@ -973,8 +1008,10 @@ class PassportProcessor: NSObject {
 
                 // 6. No image processing — preserve original colours exactly
 
-                // 7. Background removal
-                bmp = self.whitenBackground(image: bmp, face: origFace)
+                // 7. Background removal — only if background is not already white
+                if !self.hasWhiteBackground(bmp) {
+                    bmp = self.whitenBackground(image: bmp, face: origFace)
+                }
 
                 // 8. Skip forceHeadroomWhite — segmentation already handles background.
                 // The flood-fill was causing white patches on light-skin foreheads.
