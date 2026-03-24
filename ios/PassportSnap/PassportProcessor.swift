@@ -48,13 +48,13 @@ class PassportProcessor: NSObject {
     }
 
     // pxPerMm = outH / photoHeightMm
-    // US:  600 / 51.0 = 11.76 px/mm  → gap 8.2mm = 96px, face 30.4mm = 358px
-    // UK:  1200 / 45.0 = 26.67 px/mm → gap 5.0mm = 133px, face 32.4mm = 864px
-    // CAN: 1680 / 70.0 = 24.00 px/mm → gap 10.0mm = 240px, face 33.5mm = 804px
-    private static let US_SPEC  = Spec(outW:600,  outH:600,  photoHeightMm:51.0, faceMm:30.4, gapMm:8.2,  ovalOuterTop:96,  ovalOuterBottom:454, hairMult:1.12)
-    private static let UK_SPEC  = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:32.4, gapMm:5.0,  ovalOuterTop:133, ovalOuterBottom:997, hairMult:1.22)
-    private static let AUS_SPEC = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:32.4, gapMm:5.0,  ovalOuterTop:133, ovalOuterBottom:997, hairMult:1.22)
-    private static let CAN_SPEC = Spec(outW:1200, outH:1680, photoHeightMm:70.0, faceMm:33.5, gapMm:10.0, ovalOuterTop:240, ovalOuterBottom:1044, hairMult:1.075)
+    // US/IND: 600/51.0=11.765 px/mm  → gap=8.2mm→96px,  face=30.0mm→353px, bottom=449
+    // UK/etc: 1200/45.0=26.667 px/mm → gap=5.0mm→133px, face=30.0mm→800px, bottom=933
+    // CAN:    1680/70.0=24.000 px/mm → gap=10.0mm→240px, face=34.1mm→818px, bottom=1058
+    private static let US_SPEC  = Spec(outW:600,  outH:600,  photoHeightMm:51.0, faceMm:30.0, gapMm:8.2,  ovalOuterTop:96,  ovalOuterBottom:449,  hairMult:1.12)
+    private static let UK_SPEC  = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:30.0, gapMm:5.0,  ovalOuterTop:133, ovalOuterBottom:933,  hairMult:1.22)
+    private static let AUS_SPEC = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:30.0, gapMm:5.0,  ovalOuterTop:133, ovalOuterBottom:933,  hairMult:1.22)
+    private static let CAN_SPEC = Spec(outW:1200, outH:1680, photoHeightMm:70.0, faceMm:34.1, gapMm:10.0, ovalOuterTop:240, ovalOuterBottom:1058, hairMult:1.075)
 
     private func getSpec(_ country: String) -> Spec {
         switch country {
