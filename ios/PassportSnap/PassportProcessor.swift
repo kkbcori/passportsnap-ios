@@ -241,21 +241,45 @@ class PassportProcessor: NSObject {
         var pixels = extractPixels(cgImage)
         guard !pixels.isEmpty else { return image }
 
-        // ── 1. Sample background colour from corners + top strip ──────────────
-        let sz = max(8, min(w, h) / 12)
-        var rS: Float=0, gS: Float=0, bS: Float=0, n = 0
-        func samplePx(_ x: Int, _ y: Int) {
-            let i = (y * w + x) * 4
-            rS += Float(pixels[i]); gS += Float(pixels[i+1]); bS += Float(pixels[i+2])
-            n += 1
+        // ── 1. Smart background colour sampling ──────────────────────────────
+        // Corners are WRONG when dark hair or clothing fills them (very common).
+        // Instead: sample top 12% strip + left/right 10% strips (top 60% only).
+        // Then filter to keep only BRIGHT (lum>150) AND ACHROMATIC (sat<0.15) pixels
+        // — walls/backgrounds are always bright and low-saturation vs hair/clothing.
+        var candidates: [(Float,Float,Float)] = []
+        let topRows = max(1, h / 8)
+        let sideW   = max(1, w / 10)
+
+        // Top strip — full width
+        for y in 0..<topRows {
+            for x in stride(from: 0, to: w, by: max(1, w/40)) {
+                let i = (y*w+x)*4
+                candidates.append((Float(pixels[i]), Float(pixels[i+1]), Float(pixels[i+2])))
+            }
         }
-        for y in 0..<sz { for x in 0..<sz {
-            samplePx(x, y); samplePx(w-1-x, y)
-            samplePx(x, h-1-y); samplePx(w-1-x, h-1-y)
-        }}
-        // Also sample top strip centre
-        for x in stride(from: 0, to: w, by: max(1, w/20)) { samplePx(x, 0) }
-        let bgR = rS / Float(n); let bgG = gS / Float(n); let bgB = bS / Float(n)
+        // Left + right strips — top 60% of image
+        for y in stride(from: 0, to: h*6/10, by: max(1, h/40)) {
+            for x in 0..<sideW {
+                let i = (y*w+x)*4
+                candidates.append((Float(pixels[i]), Float(pixels[i+1]), Float(pixels[i+2])))
+            }
+            for x in (w-sideW)..<w {
+                let i = (y*w+x)*4
+                candidates.append((Float(pixels[i]), Float(pixels[i+1]), Float(pixels[i+2])))
+            }
+        }
+
+        // Filter: keep bright + achromatic candidates (background wall pixels)
+        var bgCands = candidates.filter { r, g, b in
+            let lum = 0.299*r + 0.587*g + 0.114*b
+            let maxC = max(r, max(g, b)); let minC = min(r, min(g, b))
+            let sat = maxC > 0 ? (maxC - minC) / maxC : 0
+            return lum > 150 && sat < 0.18
+        }
+        if bgCands.count < 10 { bgCands = candidates } // fallback: use all samples
+        let bgR = bgCands.map{$0.0}.reduce(0,+) / Float(bgCands.count)
+        let bgG = bgCands.map{$0.1}.reduce(0,+) / Float(bgCands.count)
+        let bgB = bgCands.map{$0.2}.reduce(0,+) / Float(bgCands.count)
 
         // ── 2. Per-pixel distance to background ───────────────────────────────
         var dist = [Float](repeating: 0, count: w * h)
@@ -267,32 +291,70 @@ class PassportProcessor: NSObject {
             dist[i] = sqrt(dr*dr + dg*dg + db*db)
         }
 
-        // ── 3. BFS flood-fill from all 4 borders ─────────────────────────────
-        // Tolerance: pixels within 45 colour units of background are fillable.
-        // This is tighter than the web (65) to protect light skin near bg colour.
-        let TOL: Float = 45.0
-        var bgMask = [Bool](repeating: false, count: w * h)
-        var queue = [Int]()
-        queue.reserveCapacity(w * 2 + h * 2)
+        // ── 3. Adaptive tolerance ─────────────────────────────────────────────
+        var borderDists = [Float]()
+        for x in 0..<w { borderDists.append(dist[x]); borderDists.append(dist[(h-1)*w+x]) }
+        for y in 1..<(h-1) { borderDists.append(dist[y*w]); borderDists.append(dist[y*w+w-1]) }
+        borderDists.sort()
+        let medianBorder = borderDists[borderDists.count / 2]
+        let TOL: Float  = max(25.0, min(65.0, medianBorder * 2.5 + 20.0))
+        let TOL2: Float = TOL * 1.35  // second pass — catches enclosed shoulder pockets
 
-        func tryEnqueue(_ idx: Int) {
-            guard !bgMask[idx] && dist[idx] < TOL else { return }
+        var bgMask = [Bool](repeating: false, count: w * h)
+        var queue = [Int](); queue.reserveCapacity(w * 2 + h * 2)
+
+        func enqueue(_ idx: Int, tol: Float) {
+            guard idx >= 0, idx < bgMask.count, !bgMask[idx], dist[idx] < tol else { return }
             bgMask[idx] = true; queue.append(idx)
         }
 
-        // Seed all 4 borders
-        for x in 0..<w { tryEnqueue(x); tryEnqueue((h-1)*w+x) }
-        for y in 1..<(h-1) { tryEnqueue(y*w); tryEnqueue(y*w+w-1) }
-
-        // BFS — 4-connected
+        // ── 4a. Pass 1: BFS from all 4 borders (tight TOL) ───────────────────
+        for x in 0..<w { enqueue(x, tol: TOL); enqueue((h-1)*w+x, tol: TOL) }
+        for y in 1..<(h-1) { enqueue(y*w, tol: TOL); enqueue(y*w+w-1, tol: TOL) }
         var qi = 0
         while qi < queue.count {
             let idx = queue[qi]; qi += 1
             let x = idx % w; let y = idx / w
-            if x > 0   { tryEnqueue(idx-1) }
-            if x < w-1 { tryEnqueue(idx+1) }
-            if y > 0   { tryEnqueue(idx-w) }
-            if y < h-1 { tryEnqueue(idx+w) }
+            if x > 0   { enqueue(idx-1, tol: TOL) }
+            if x < w-1 { enqueue(idx+1, tol: TOL) }
+            if y > 0   { enqueue(idx-w, tol: TOL) }
+            if y < h-1 { enqueue(idx+w, tol: TOL) }
+        }
+
+        // ── 4b. Pass 2: Expand from fill boundary, achromatic pixels only ────
+        // Catches shoulder background pockets enclosed by dark jacket at border.
+        // CRITICAL: only expand into LOW-SATURATION pixels (sat < 0.20).
+        // Pink shirts (sat~0.39) and blue shirts (sat~0.51) are rejected.
+        // Background walls (sat~0.04–0.11) are accepted.
+        func saturation(_ idx: Int) -> Float {
+            let pi = idx * 4
+            let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
+            let maxC = max(r, max(g, b)); let minC = min(r, min(g, b))
+            return maxC > 0 ? (maxC - minC) / maxC : 0
+        }
+
+        func enqueueAchromatic(_ idx: Int, tol: Float) {
+            guard idx >= 0, idx < bgMask.count, !bgMask[idx],
+                  dist[idx] < tol, saturation(idx) < 0.20 else { return }
+            bgMask[idx] = true; queue.append(idx)
+        }
+
+        queue.removeAll(keepingCapacity: true)
+        for idx in 0..<(w*h) {
+            guard bgMask[idx] else { continue }
+            let x = idx % w; let y = idx / w
+            for n in [x>0 ? idx-1:-1, x<w-1 ? idx+1:-1, y>0 ? idx-w:-1, y<h-1 ? idx+w:-1] {
+                enqueueAchromatic(n, tol: TOL2)
+            }
+        }
+        qi = 0
+        while qi < queue.count {
+            let idx = queue[qi]; qi += 1
+            let x = idx % w; let y = idx / w
+            if x > 0   { enqueueAchromatic(idx-1, tol: TOL2) }
+            if x < w-1 { enqueueAchromatic(idx+1, tol: TOL2) }
+            if y > 0   { enqueueAchromatic(idx-w, tol: TOL2) }
+            if y < h-1 { enqueueAchromatic(idx+w, tol: TOL2) }
         }
 
         // ── 4. Gaussian-soften the mask edge for smooth transitions ───────────
