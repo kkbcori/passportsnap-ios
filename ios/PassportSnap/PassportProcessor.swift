@@ -223,111 +223,96 @@ class PassportProcessor: NSObject {
     }
 
     // MARK: ── Background Removal ─────────────────────────────────────────────
-    // Mirrors Android whitenBackground() exactly.
+    // Uses flood-fill from image borders — same as web fallback, works for all
+    // background colours without relying on ML mask quality.
 
     private func whitenBackground(image: UIImage, faceCx: Int) -> UIImage {
-        if #available(iOS 15.0, *) {
-            return segmentationRemoval(image: image, faceCx: faceCx)
-        }
-        return pixelLevelFallback(image: image)
+        return floodFillBackgroundRemoval(image: image)
     }
 
-    @available(iOS 15.0, *)
-    private func segmentationRemoval(image: UIImage, faceCx: Int) -> UIImage {
+    /// Flood-fill background removal — mirrors web removeBackgroundFallback().
+    /// 1. Sample background colour from image corners
+    /// 2. BFS flood-fill from all 4 image borders through pixels similar to bg colour
+    /// 3. Gaussian-soften the mask edge for smooth hair/skin transitions
+    /// 4. Composite result onto pure white
+    private func floodFillBackgroundRemoval(image: UIImage) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
         let w = cgImage.width; let h = cgImage.height
-
-        var maskFlat: [Float]?; var mW = 0; var mH = 0
-        let sem = DispatchSemaphore(value: 0)
-
-        let req = VNGeneratePersonSegmentationRequest { r, _ in
-            defer { sem.signal() }
-            guard let obs = r.results?.first as? VNPixelBufferObservation else { return }
-            let buf = obs.pixelBuffer
-            CVPixelBufferLockBaseAddress(buf, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
-            mW = CVPixelBufferGetWidth(buf); mH = CVPixelBufferGetHeight(buf)
-            guard let base = CVPixelBufferGetBaseAddress(buf) else { return }
-            let ptr = base.assumingMemoryBound(to: Float32.self)
-            let bpr = CVPixelBufferGetBytesPerRow(buf)
-            let fpr = bpr / MemoryLayout<Float32>.size
-            var flat = [Float](repeating: 0, count: mW * mH)
-            for row in 0..<mH {
-                let src = ptr.advanced(by: row * fpr)
-                for col in 0..<mW { flat[row * mW + col] = src[col] }
-            }
-            maskFlat = flat
-        }
-        req.qualityLevel = .accurate
-        try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([req])
-        sem.wait()
-
-        guard var raw = maskFlat, mW > 0, mH > 0 else {
-            return pixelLevelFallback(image: image)
-        }
-
-        // NO sigmoid sharpening for VNGeneratePersonSegmentationRequest.
-        // Unlike ML Kit (Android) or U2-Net (web) which output near-binary 0/1 masks,
-        // Apple's model outputs a soft alpha mask intentionally — face edges land at
-        // 0.40-0.60 confidence. Sigmoid sharpening collapses these to ~0.0 and cuts
-        // real face pixels. Apple's mask is designed to be used directly as alpha.
-        // Just clamp to valid range and guard NaN.
-        for i in 0..<raw.count {
-            let v = raw[i]
-            raw[i] = v.isFinite ? max(0, min(1, v)) : 1
-        }
-
-        // Bilinear upsample to image size
-        var mask = [Float](repeating: 0, count: w * h)
-        let sX = Float(mW - 1) / Float(max(w - 1, 1))
-        let sY = Float(mH - 1) / Float(max(h - 1, 1))
-        for y in 0..<h {
-            for x in 0..<w {
-                let sx = Float(x) * sX; let sy = Float(y) * sY
-                let x0 = min(Int(sx), mW-2); let y0 = min(Int(sy), mH-2)
-                let fx = sx - Float(x0); let fy2 = sy - Float(y0)
-                let v = raw[y0*mW+x0]*(1-fx)*(1-fy2) + raw[y0*mW+x0+1]*fx*(1-fy2) +
-                        raw[(y0+1)*mW+x0]*(1-fx)*fy2 + raw[(y0+1)*mW+x0+1]*fx*fy2
-                mask[y*w+x] = v.isFinite ? v : 1
-            }
-        }
-
-        // Gaussian blur for smooth edges
-        let blurR = max(2, min(w, h) / 300)
-        mask = gaussianBlurMask(mask, w: w, h: h, radius: blurR)
-
         var pixels = extractPixels(cgImage)
+        guard !pixels.isEmpty else { return image }
 
-        // Alpha blend — trust ML mask directly, only boost very dark pixels (hair edges)
-        // Removed skin-colour heuristic: if faceCx is slightly off, the sampled "skin"
-        // colour contains background pixels → dist < 60 then whitens face pixels.
-        for idx in 0..<(w*h) {
-            var alpha = mask[idx]
-            let pi = idx*4
+        // ── 1. Sample background colour from corners + top strip ──────────────
+        let sz = max(8, min(w, h) / 12)
+        var rS: Float=0, gS: Float=0, bS: Float=0, n = 0
+        func samplePx(_ x: Int, _ y: Int) {
+            let i = (y * w + x) * 4
+            rS += Float(pixels[i]); gS += Float(pixels[i+1]); bS += Float(pixels[i+2])
+            n += 1
+        }
+        for y in 0..<sz { for x in 0..<sz {
+            samplePx(x, y); samplePx(w-1-x, y)
+            samplePx(x, h-1-y); samplePx(w-1-x, h-1-y)
+        }}
+        // Also sample top strip centre
+        for x in stride(from: 0, to: w, by: max(1, w/20)) { samplePx(x, 0) }
+        let bgR = rS / Float(n); let bgG = gS / Float(n); let bgB = bS / Float(n)
+
+        // ── 2. Per-pixel distance to background ───────────────────────────────
+        var dist = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w*h) {
+            let pi = i*4
+            let dr = Float(pixels[pi]) - bgR
+            let dg = Float(pixels[pi+1]) - bgG
+            let db = Float(pixels[pi+2]) - bgB
+            dist[i] = sqrt(dr*dr + dg*dg + db*db)
+        }
+
+        // ── 3. BFS flood-fill from all 4 borders ─────────────────────────────
+        // Tolerance: pixels within 45 colour units of background are fillable.
+        // This is tighter than the web (65) to protect light skin near bg colour.
+        let TOL: Float = 45.0
+        var bgMask = [Bool](repeating: false, count: w * h)
+        var queue = [Int]()
+        queue.reserveCapacity(w * 2 + h * 2)
+
+        func tryEnqueue(_ idx: Int) {
+            guard !bgMask[idx] && dist[idx] < TOL else { return }
+            bgMask[idx] = true; queue.append(idx)
+        }
+
+        // Seed all 4 borders
+        for x in 0..<w { tryEnqueue(x); tryEnqueue((h-1)*w+x) }
+        for y in 1..<(h-1) { tryEnqueue(y*w); tryEnqueue(y*w+w-1) }
+
+        // BFS — 4-connected
+        var qi = 0
+        while qi < queue.count {
+            let idx = queue[qi]; qi += 1
+            let x = idx % w; let y = idx / w
+            if x > 0   { tryEnqueue(idx-1) }
+            if x < w-1 { tryEnqueue(idx+1) }
+            if y > 0   { tryEnqueue(idx-w) }
+            if y < h-1 { tryEnqueue(idx+w) }
+        }
+
+        // ── 4. Gaussian-soften the mask edge for smooth transitions ───────────
+        var floatMask = [Float](repeating: 0, count: w*h)
+        for i in 0..<(w*h) { floatMask[i] = bgMask[i] ? 1.0 : 0.0 }
+        let blurR = max(3, min(w, h) / 200)
+        let softMask = gaussianBlurMask(floatMask, w: w, h: h, radius: blurR)
+
+        // ── 5. Apply: blend bg pixels toward white ────────────────────────────
+        for i in 0..<(w*h) {
+            let alpha = softMask[i]  // 0 = person (keep), 1 = background (whiten)
+            guard alpha > 0.02 else { continue }
+            let pi = i * 4
             let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
-
-            // Trust Apple's soft mask directly — no colour heuristics.
-            // Only give a gentle boost to very dark hair pixels at the edge,
-            // as the ML model slightly under-detects fine dark hair strands.
-            if alpha > 0.05 && alpha < 0.60 {
-                let lum = r*0.299 + g*0.587 + b*0.114
-                if lum < 80 { alpha = min(1, alpha * 1.3) }
-            }
-
-            if !alpha.isFinite { alpha = 1 }
-            alpha = max(0, min(1, alpha))
-
-            if alpha >= 0.99 {
-                // fully person — keep unchanged
-            } else if alpha <= 0.01 {
+            if alpha >= 0.98 {
                 pixels[pi]=255; pixels[pi+1]=255; pixels[pi+2]=255
             } else {
-                let br = r*alpha + 255*(1-alpha)
-                let bg = g*alpha + 255*(1-alpha)
-                let bb2 = b*alpha + 255*(1-alpha)
-                pixels[pi]   = UInt8((br.isFinite ? br : 255).clamped(to: 0...255))
-                pixels[pi+1] = UInt8((bg.isFinite ? bg : 255).clamped(to: 0...255))
-                pixels[pi+2] = UInt8((bb2.isFinite ? bb2 : 255).clamped(to: 0...255))
+                pixels[pi]   = UInt8((r*(1-alpha) + 255*alpha).clamped(to: 0...255))
+                pixels[pi+1] = UInt8((g*(1-alpha) + 255*alpha).clamped(to: 0...255))
+                pixels[pi+2] = UInt8((b*(1-alpha) + 255*alpha).clamped(to: 0...255))
             }
         }
 
