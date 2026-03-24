@@ -174,27 +174,40 @@ class PassportProcessor: NSObject {
         let req = VNDetectFaceLandmarksRequest { r, e in
             defer { sem.signal() }
             if let e = e { err = e; return }
-            guard let obs = (r.results as? [VNFaceObservation])?.max(by: {
-                $0.boundingBox.width * $0.boundingBox.height <
-                $1.boundingBox.width * $1.boundingBox.height }) else {
+            guard let observations = r.results as? [VNFaceObservation],
+                  let obs = observations.max(by: {
+                      $0.boundingBox.width * $0.boundingBox.height <
+                      $1.boundingBox.width * $1.boundingBox.height
+                  }) else {
                 err = NSError(domain: "PP", code: 2, userInfo: [NSLocalizedDescriptionKey: "No face"])
                 return
             }
 
             let bb = obs.boundingBox
-            let fx = Int(bb.minX * CGFloat(w))
-            let fy = Int((1.0 - bb.maxY) * CGFloat(h))
-            let fw = Int(bb.width * CGFloat(w))
-            let fh = Int(bb.height * CGFloat(h))
+            let wF = CGFloat(w); let hF = CGFloat(h)
+            let fx = Int(bb.minX * wF)
+            let fy = Int((1.0 - bb.maxY) * hF)
+            let fw = Int(bb.width  * wF)
+            let fh = Int(bb.height * hF)
+            let fhF = CGFloat(fh)
             let cx = fx + fw / 2
 
             var eyeY = fy + Int(Double(fh) * 0.37) // fallback
             if let lm = obs.landmarks,
-               let le = lm.leftEye, let re = lm.rightEye,
-               !le.normalizedPoints.isEmpty, !re.normalizedPoints.isEmpty {
-                let leY = le.normalizedPoints.map { (1.0 - bb.maxY) * CGFloat(h) + (1.0 - $0.y) * CGFloat(fh) }
-                let reY = re.normalizedPoints.map { (1.0 - bb.maxY) * CGFloat(h) + (1.0 - $0.y) * CGFloat(fh) }
-                eyeY = Int((leY.reduce(0,+) / CGFloat(leY.count) + reY.reduce(0,+) / CGFloat(reY.count)) / 2)
+               let le = lm.leftEye,
+               let re = lm.rightEye {
+                let lePts = le.normalizedPoints
+                let rePts = re.normalizedPoints
+                if !lePts.isEmpty && !rePts.isEmpty {
+                    let baseY = (1.0 - bb.maxY) * hF
+                    var leSum: CGFloat = 0
+                    for pt in lePts { leSum += baseY + (1.0 - pt.y) * fhF }
+                    var reSum: CGFloat = 0
+                    for pt in rePts { reSum += baseY + (1.0 - pt.y) * fhF }
+                    let leAvg = leSum / CGFloat(lePts.count)
+                    let reAvg = reSum / CGFloat(rePts.count)
+                    eyeY = Int((leAvg + reAvg) / 2.0)
+                }
             }
 
             result = FaceData(eyeY: eyeY, faceCx: cx, fy: fy, fh: fh)
@@ -203,7 +216,10 @@ class PassportProcessor: NSObject {
         try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([req])
         sem.wait()
         if let e = err { throw e }
-        return result ?? { throw NSError(domain: "PP", code: 3, userInfo: [NSLocalizedDescriptionKey: "Face timeout"]) }()
+        guard let r = result else {
+            throw NSError(domain: "PP", code: 3, userInfo: [NSLocalizedDescriptionKey: "Face detection returned no result"])
+        }
+        return r
     }
 
     // MARK: ── Background Removal ─────────────────────────────────────────────
@@ -386,12 +402,12 @@ class PassportProcessor: NSObject {
         let pixels = extractPixels(cgImage)
         let STEP = 2
 
-        func isNonWhite(_ i: Int) -> Bool {
+        let isNonWhite = { (i: Int) -> Bool in
             return pixels[i] < 245 || pixels[i+1] < 245 || pixels[i+2] < 245
         }
 
         // Skin tone in YCbCr — matches web version exactly, including dark skin
-        func isSkin(_ i: Int) -> Bool {
+        let isSkin = { (i: Int) -> Bool in
             let r=Float(pixels[i]), g=Float(pixels[i+1]), b=Float(pixels[i+2])
             let Y  =  0.299*r + 0.587*g + 0.114*b
             let Cb = -0.169*r - 0.331*g + 0.500*b + 128
@@ -540,8 +556,9 @@ class PassportProcessor: NSObject {
 
                 // 4. Downscale to ≤2000px for processing
                 let (procBmp2, procScale2) = self.downscale(bmp, maxDim: 2000)
+                let ps2 = Double(procScale2)
                 if procScale2 < 1.0 { bmp = procBmp2 }
-                let scaledCx = Int(CGFloat(origFaceCx) * CGFloat(procScale2))
+                let scaledCx = Int(Double(origFaceCx) * ps2)
 
                 // 5. Background removal
                 bmp = self.whitenBackground(image: bmp, faceCx: scaledCx)
@@ -645,8 +662,6 @@ class PassportProcessor: NSObject {
                     throw NSError(domain:"PP", code:20, userInfo:[NSLocalizedDescriptionKey:"Decode failed"])
                 }
 
-                let iw = Int(src.size.width * src.scale)
-                let ih = Int(src.size.height * src.scale)
                 let pad = max(outW, max(outH, max(abs(cropX), abs(cropY))))
                 let (padded, pw, ph) = self.padImage(src, padX: pad, padY: pad)
 

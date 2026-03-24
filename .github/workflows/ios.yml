@@ -117,6 +117,20 @@ jobs:
           APP_STORE_CONNECT_ISSUER_ID:  ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY_BASE64 }}
 
+      - name: Print build log on failure
+        if: failure()
+        run: |
+          echo "=== Searching for build logs ==="
+          find . -name "*.log" -path "*/logs/*" 2>/dev/null | head -5
+          LOG=$(find . -name "*.log" -path "*/logs/*" 2>/dev/null | head -1)
+          if [ -n "$LOG" ]; then
+            echo "=== BUILD ERRORS ==="
+            grep -E "error:" "$LOG" | grep -v "^note:" | head -50
+          else
+            echo "No log file found"
+            find . -name "*.xcresult" 2>/dev/null | head -3
+          fi
+
       - name: Upload IPA artifact
         if: always()
         uses: actions/upload-artifact@v4
