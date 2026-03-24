@@ -266,11 +266,15 @@ class PassportProcessor: NSObject {
             return pixelLevelFallback(image: image)
         }
 
-        // Sigmoid sharpening (matches Android exactly)
+        // NO sigmoid sharpening for VNGeneratePersonSegmentationRequest.
+        // Unlike ML Kit (Android) or U2-Net (web) which output near-binary 0/1 masks,
+        // Apple's model outputs a soft alpha mask intentionally — face edges land at
+        // 0.40-0.60 confidence. Sigmoid sharpening collapses these to ~0.0 and cuts
+        // real face pixels. Apple's mask is designed to be used directly as alpha.
+        // Just clamp to valid range and guard NaN.
         for i in 0..<raw.count {
-            let v = raw[i]; guard v.isFinite else { raw[i] = 1; continue }
-            let s = Float(1.0 / (1.0 + exp(Double(-12.0 * (v - 0.45)))))
-            raw[i] = s.isFinite ? s : 1
+            let v = raw[i]
+            raw[i] = v.isFinite ? max(0, min(1, v)) : 1
         }
 
         // Bilinear upsample to image size
@@ -302,14 +306,12 @@ class PassportProcessor: NSObject {
             let pi = idx*4
             let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
 
-            // Only touch the uncertain transition zone (0.05–0.85)
-            if alpha > 0.05 && alpha < 0.85 {
+            // Trust Apple's soft mask directly — no colour heuristics.
+            // Only give a gentle boost to very dark hair pixels at the edge,
+            // as the ML model slightly under-detects fine dark hair strands.
+            if alpha > 0.05 && alpha < 0.60 {
                 let lum = r*0.299 + g*0.587 + b*0.114
-                // Dark pixels in transition = almost certainly hair, not background → keep
-                if      lum < 60  { alpha = min(1, alpha * 1.5) }
-                else if lum < 100 { alpha = min(1, alpha * 1.2) }
-                // Bright pixels in transition = almost certainly background → remove
-                else if lum > 200 { alpha = alpha * 0.5 }
+                if lum < 80 { alpha = min(1, alpha * 1.3) }
             }
 
             if !alpha.isFinite { alpha = 1 }
