@@ -292,40 +292,31 @@ class PassportProcessor: NSObject {
         let blurR = max(2, min(w, h) / 300)
         mask = gaussianBlurMask(mask, w: w, h: h, radius: blurR)
 
-        // Sample skin colour near face centre
         var pixels = extractPixels(cgImage)
-        let cx = max(0, min(faceCx, w-1))
-        let cy = max(0, min(h/2, h-1))
-        let sr2 = max(5, w / 8)
-        var sR: Float=0, sG: Float=0, sB: Float=0, sN = 0
-        for py in max(0, cy-sr2)...min(h-1, cy+sr2) {
-            for px in max(0, cx-sr2)...min(w-1, cx+sr2) {
-                let i = (py*w+px)*4
-                sR += Float(pixels[i]); sG += Float(pixels[i+1]); sB += Float(pixels[i+2])
-                sN += 1
-            }
-        }
-        if sN > 0 { sR /= Float(sN); sG /= Float(sN); sB /= Float(sN) }
 
-        // Alpha blend — matches Android Step 5
+        // Alpha blend — trust ML mask directly, only boost very dark pixels (hair edges)
+        // Removed skin-colour heuristic: if faceCx is slightly off, the sampled "skin"
+        // colour contains background pixels → dist < 60 then whitens face pixels.
         for idx in 0..<(w*h) {
             var alpha = mask[idx]
             let pi = idx*4
             let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
 
+            // Only touch the uncertain transition zone (0.05–0.85)
             if alpha > 0.05 && alpha < 0.85 {
                 let lum = r*0.299 + g*0.587 + b*0.114
-                if      lum < 80  { alpha = min(1, alpha * 1.8) }
-                else if lum < 120 { alpha = min(1, alpha * 1.4) }
-                let d = sqrt(pow(r-sR,2) + pow(g-sG,2) + pow(b-sB,2))
-                if d < 60 { alpha = min(1, alpha * 1.6) }
+                // Dark pixels in transition = almost certainly hair, not background → keep
+                if      lum < 60  { alpha = min(1, alpha * 1.5) }
+                else if lum < 100 { alpha = min(1, alpha * 1.2) }
+                // Bright pixels in transition = almost certainly background → remove
+                else if lum > 200 { alpha = alpha * 0.5 }
             }
 
             if !alpha.isFinite { alpha = 1 }
             alpha = max(0, min(1, alpha))
 
             if alpha >= 0.99 {
-                // keep
+                // fully person — keep unchanged
             } else if alpha <= 0.01 {
                 pixels[pi]=255; pixels[pi+1]=255; pixels[pi+2]=255
             } else {
@@ -354,10 +345,18 @@ class PassportProcessor: NSObject {
             }
         }}
         let bgR=Float(rS/max(n,1)), bgG=Float(gS/max(n,1)), bgB=Float(bS/max(n,1))
-        for i in stride(from:0, to:px.count-2, by:4) {
+        for i in stride(from:0, to:px.count-3, by:4) {
             let r=Float(px[i]),g=Float(px[i+1]),b=Float(px[i+2])
             let dist = sqrt(pow(r-bgR,2)+pow(g-bgG,2)+pow(b-bgB,2))
-            if dist < 50 { px[i]=255; px[i+1]=255; px[i+2]=255 }
+            if dist < 35 {
+                // Skip skin-toned pixels — never whiten face even in fallback
+                let Y  =  0.299*r + 0.587*g + 0.114*b
+                let Cb = -0.169*r - 0.331*g + 0.500*b + 128
+                let Cr =  0.500*r - 0.419*g - 0.081*b + 128
+                if !(Y > 30 && Y < 242 && Cb > 60 && Cb < 140 && Cr > 128 && Cr < 190) {
+                    px[i]=255; px[i+1]=255; px[i+2]=255
+                }
+            }
         }
         return rebuildImage(pixels: px, width: w, height: h) ?? image
     }
