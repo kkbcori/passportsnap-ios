@@ -303,22 +303,38 @@ class PassportProcessor: NSObject {
         var bgMask = [Bool](repeating: false, count: w * h)
         var queue = [Int](); queue.reserveCapacity(w * 2 + h * 2)
 
-        func enqueue(_ idx: Int, tol: Float) {
-            guard idx >= 0, idx < bgMask.count, !bgMask[idx], dist[idx] < tol else { return }
-            bgMask[idx] = true; queue.append(idx)
+        // ── 4a. Pass 1: BFS from all 4 borders (tight TOL) ───────────────────
+        // Also expand pass1 into achromatic pixels slightly outside TOL
+        // This handles cream bg pixels that sit at dist=TOL+5 due to
+        // lighting variation (corners vs centre of wall).
+        let TOL_ACHROMATIC: Float = TOL * 1.15  // 15% looser but ONLY for achromatic pixels
+
+        func enqueueOrAchromatic(_ idx: Int) {
+            guard idx >= 0, idx < bgMask.count, !bgMask[idx] else { return }
+            let d = dist[idx]
+            if d < TOL {
+                bgMask[idx] = true; queue.append(idx); return
+            }
+            // Achromatic bonus: slightly brighter tolerance for low-saturation pixels
+            if d < TOL_ACHROMATIC {
+                let pi = idx * 4
+                let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
+                let maxC = max(r, max(g, b)); let minC = min(r, min(g, b))
+                let sat = maxC > 0 ? (maxC - minC) / maxC : 0
+                if sat < 0.12 { bgMask[idx] = true; queue.append(idx) }
+            }
         }
 
-        // ── 4a. Pass 1: BFS from all 4 borders (tight TOL) ───────────────────
-        for x in 0..<w { enqueue(x, tol: TOL); enqueue((h-1)*w+x, tol: TOL) }
-        for y in 1..<(h-1) { enqueue(y*w, tol: TOL); enqueue(y*w+w-1, tol: TOL) }
+        for x in 0..<w { enqueueOrAchromatic(x); enqueueOrAchromatic((h-1)*w+x) }
+        for y in 1..<(h-1) { enqueueOrAchromatic(y*w); enqueueOrAchromatic(y*w+w-1) }
         var qi = 0
         while qi < queue.count {
             let idx = queue[qi]; qi += 1
             let x = idx % w; let y = idx / w
-            if x > 0   { enqueue(idx-1, tol: TOL) }
-            if x < w-1 { enqueue(idx+1, tol: TOL) }
-            if y > 0   { enqueue(idx-w, tol: TOL) }
-            if y < h-1 { enqueue(idx+w, tol: TOL) }
+            if x > 0   { enqueueOrAchromatic(idx-1) }
+            if x < w-1 { enqueueOrAchromatic(idx+1) }
+            if y > 0   { enqueueOrAchromatic(idx-w) }
+            if y < h-1 { enqueueOrAchromatic(idx+w) }
         }
 
         // ── 4b. Pass 2: Expand from fill boundary, achromatic pixels only ────
@@ -463,13 +479,22 @@ class PassportProcessor: NSObject {
             return Y > 30 && Y < 242 && Cb > 60 && Cb < 140 && Cr > 128 && Cr < 190
         }
 
-        // Step 1: headTop — first row in centre 60% with ≥10 non-white pixels
+        // Step 1: headTop — first SOLID non-white row in centre 60%
+        // Threshold 230 (not 245): cream/beige residuals after bg removal are
+        // typically R=235-244 — they pass 245 but fail 230. Real hair is R<200.
+        // Require ≥25 pixels per row (not 10): bg residuals are sparse (1-5px),
+        // hair is a solid band (50+ px). This prevents false early detection.
+        // Skip top 6%: background borders are never completely clean after removal.
         let htL = w * 20 / 100; let htR = w * 80 / 100
+        let scanStartY = h * 6 / 100
         var headTop = -1
-        for y in stride(from: 0, to: h, by: STEP) {
+        for y in stride(from: scanStartY, to: h, by: STEP) {
             var count = 0
             for x in stride(from: htL, to: htR, by: STEP) {
-                if isNonWhite((y*w+x)*4) { count += 1; if count >= 10 { headTop = y; break } }
+                let i = (y*w+x)*4
+                // Stricter: pixel must be noticeably non-white (luma < 230)
+                let lum = Int(pixels[i])*299 + Int(pixels[i+1])*587 + Int(pixels[i+2])*114
+                if lum < 230000 { count += 1; if count >= 25 { headTop = y; break } }
             }
             if headTop != -1 { break }
         }

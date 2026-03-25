@@ -20,6 +20,17 @@ import RNFS from 'react-native-fs';
 
 const { PassportProcessor } = NativeModules;
 
+const SAMPLE_IMAGES: Record<string, any> = {
+  USA: require('../assets/sample_reference.png'),
+  IND: require('../assets/sample_reference.png'),
+  GBR: require('../assets/sample_reference_35x45.png'),
+  AUS: require('../assets/sample_reference_35x45.png'),
+  SCH: require('../assets/sample_reference_35x45.png'),
+  DEU: require('../assets/sample_reference_35x45.png'),
+  ZAF: require('../assets/sample_reference_35x45.png'),
+  CAN: require('../assets/sample_reference_50x70.png'),
+};
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 type RouteParams = {
   preparedUri:    string;
@@ -72,7 +83,7 @@ export default function AdjustScreen() {
   }
 
   const autoT = computeAutoTransform();
-  const MIN_SCALE = 0.3; const MAX_SCALE = 4.0;
+  const MIN_SCALE = 0.05; const MAX_SCALE = 4.0;
   const BRIGHTNESS_STEP = 5;
   const MIN_BRIGHTNESS = -50; const MAX_BRIGHTNESS = 50;
 
@@ -191,7 +202,7 @@ export default function AdjustScreen() {
 
         <View style={styles.hintNote}>
           <View style={styles.hintRow}>
-            <Image source={require('../assets/sample_reference.png')} style={styles.sampleImage} resizeMode="contain" />
+            <Image source={SAMPLE_IMAGES[country] ?? SAMPLE_IMAGES.USA} style={styles.sampleImage} resizeMode="contain" />
             <View style={styles.hintPoints}>
               <Text style={styles.hintPointTitle}>ALIGNMENT GUIDE</Text>
               <Text style={styles.hintBullet}>✓  Head and crown near the top of the outer oval</Text>
