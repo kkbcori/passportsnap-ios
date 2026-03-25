@@ -205,10 +205,10 @@ export default function AdjustScreen() {
             <Image source={SAMPLE_IMAGES[country] ?? SAMPLE_IMAGES.USA} style={styles.sampleImage} resizeMode="contain" />
             <View style={styles.hintPoints}>
               <Text style={styles.hintPointTitle}>ALIGNMENT GUIDE</Text>
-              <Text style={styles.hintBullet}>✓  Head and crown near the top of the outer oval</Text>
-              <Text style={styles.hintBullet}>✓  Eyes positioned between the two blue lines</Text>
-              <Text style={styles.hintBullet}>✓  Face fills inner oval, stays within outer</Text>
-              <Text style={styles.hintBullet}>✓  Vertical dashed line centred through the nose</Text>
+              <Text style={styles.hintBullet}>✓  Chin does not extend beyond the outer oval</Text>
+              <Text style={styles.hintBullet}>✓  Eyes between the blue lines</Text>
+              <Text style={styles.hintBullet}>✓  Face fills the inner dashed oval</Text>
+              <Text style={styles.hintBullet}>✓  Vertical line through nose</Text>
             </View>
           </View>
         </View>

@@ -1,29 +1,33 @@
 /**
  * PaywallScreen — purchase options before download
- * Updated: price $1.50 (matches new Android version), platform-aware payment copy
+ * Uses RevenueCat (react-native-purchases) for IAP
+ * Products: passport_single ($1.50), passport_4x6 ($1.50), passport_bundle ($2.49)
  */
 import React, { useState } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  SafeAreaView, ActivityIndicator, Alert, Modal, Platform,
+  SafeAreaView, ActivityIndicator, Alert, Modal, ScrollView,
 } from 'react-native';
+
 import Purchases from 'react-native-purchases';
 
-const PRODUCT_SINGLE = 'passport_single';
-const PRODUCT_4X6    = 'passport_4x6';
+// Product IDs (must match Google Play Console + RevenueCat exactly):
+const PRODUCT_SINGLE = 'passport_single';   // $1.50 — single photo
+const PRODUCT_4X6    = 'passport_4x6';      // $1.50 — 4x6 print sheet
+const PRODUCT_BUNDLE = 'passport_bundle';   // $2.49 — both files
 
 interface Props {
-  visible:     boolean;
-  onClose:     () => void;
-  onPurchased: (type: 'single' | '4x6') => void;
-  country?:    string;
+  visible:       boolean;
+  onClose:       () => void;
+  onPurchased:   (type: 'single' | '4x6' | 'bundle') => void;
+  country?:      string;
 }
 
 export default function PaywallScreen({ visible, onClose, onPurchased, country }: Props) {
   const [loading, setLoading] = useState<string | null>(null);
 
-  const purchase = async (type: 'single' | '4x6') => {
-    const productId = type === 'single' ? PRODUCT_SINGLE : PRODUCT_4X6;
+  const purchase = async (type: 'single' | '4x6' | 'bundle') => {
+    const productId = type === 'single' ? PRODUCT_SINGLE : type === '4x6' ? PRODUCT_4X6 : PRODUCT_BUNDLE;
     setLoading(type);
     try {
       const offerings = await Purchases.getOfferings();
@@ -36,13 +40,13 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
 
       const { customerInfo } = await Purchases.purchasePackage(pkg);
 
-      const entitlementId = type === 'single' ? 'download_single' : 'download_4x6';
+      const entitlementId = type === 'single' ? 'download_single' : type === '4x6' ? 'download_4x6' : 'download_bundle';
       if (customerInfo.entitlements.active[entitlementId]) {
         onPurchased(type);
       } else {
-        Alert.alert('Purchase issue',
-          'Payment received but entitlement not found. Please contact support.');
+        Alert.alert('Purchase issue', 'Payment received but entitlement not found. Please contact support.');
       }
+
     } catch (e: any) {
       if (!e?.userCancelled) {
         Alert.alert('Purchase failed', e?.message ?? 'Please try again.');
@@ -53,27 +57,19 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
   };
 
   const countryLabel =
-    country === 'GBR' ? 'UK'          :
-    country === 'AUS' ? 'Australia'   :
-    country === 'IND' ? 'India'       :
-    country === 'CAN' ? 'Canada'      :
-    country === 'SCH' ? 'Schengen'    :
-    country === 'DEU' ? 'Germany'     :
-    country === 'ZAF' ? 'South Africa': 'US';
-
-  const paymentCopy = Platform.OS === 'ios'
-    ? '🔐  Secure payment via Apple Pay'
-    : '🔐  Secure payment via Google Play';
+    country === 'GBR' ? 'UK' :
+    country === 'AUS' ? 'Australia' :
+    country === 'CAN' ? 'Canada' :
+    country === 'SCH' ? 'Schengen' :
+    country === 'DEU' ? 'Germany' :
+    country === 'ZAF' ? 'South Africa' :
+    country === 'IND' ? 'India' : 'US';
 
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={onClose}
-    >
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <SafeAreaView style={styles.safe}>
 
+        {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <Text style={styles.headerTitle}>Download Your Photo</Text>
@@ -84,91 +80,125 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
           </TouchableOpacity>
         </View>
 
-        <View style={styles.noticeBanner}>
-          <Text style={styles.noticeIcon}>🔒</Text>
-          <Text style={styles.noticeText}>
-            Your photo is ready. Purchase to download without the watermark.
-          </Text>
-        </View>
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
 
-        <View style={styles.products}>
-
-          {/* Single photo — $1.50 */}
-          <View style={styles.productCard}>
-            <View style={styles.productTop}>
-              <View style={styles.productIcon}>
-                <Text style={styles.productEmoji}>🖼️</Text>
-              </View>
-              <View style={styles.productInfo}>
-                <Text style={styles.productName}>Single Photo</Text>
-                <Text style={styles.productDesc}>
-                  One passport photo · Full resolution · No watermark
-                </Text>
-                <View style={styles.productTags}>
-                  <Text style={styles.tag}>2×2 in</Text>
-                  <Text style={styles.tag}>300 DPI</Text>
-                  <Text style={styles.tag}>Instant download</Text>
-                </View>
-              </View>
-            </View>
-            <TouchableOpacity
-              style={[styles.buyBtn, styles.buyBtnSecondary]}
-              onPress={() => purchase('single')}
-              disabled={loading !== null}
-              activeOpacity={0.85}
-            >
-              {loading === 'single'
-                ? <ActivityIndicator color="#fff" />
-                : <Text style={styles.buyBtnText}>
-                    Buy for <Text style={styles.buyBtnPrice}>$1.50</Text>
-                  </Text>
-              }
-            </TouchableOpacity>
+          {/* Watermark notice */}
+          <View style={styles.noticeBanner}>
+            <Text style={styles.noticeIcon}>🔒</Text>
+            <Text style={styles.noticeText}>
+              Your photo is ready. Purchase to download without the watermark.
+            </Text>
           </View>
 
-          {/* 4×6 print sheet — $1.50 */}
-          <View style={[styles.productCard, styles.productCardFeatured]}>
-            <View style={styles.featuredBadge}>
-              <Text style={styles.featuredBadgeText}>BEST VALUE</Text>
-            </View>
-            <View style={styles.productTop}>
-              <View style={[styles.productIcon, styles.productIconGold]}>
-                <Text style={styles.productEmoji}>🖨️</Text>
+          {/* Products */}
+          <View style={styles.products}>
+
+            {/* Bundle — BEST VALUE */}
+            <View style={[styles.productCard, styles.productCardBundle]}>
+              <View style={styles.bundleBadge}>
+                <Text style={styles.bundleBadgeText}>BEST VALUE</Text>
               </View>
-              <View style={styles.productInfo}>
-                <Text style={[styles.productName, styles.productNameGold]}>4×6 Print Sheet</Text>
-                <Text style={styles.productDesc}>
-                  2 photos on a 4×6 print-ready sheet · Take to any photo lab
-                </Text>
-                <View style={styles.productTags}>
-                  <Text style={[styles.tag, styles.tagGold]}>Print ready</Text>
-                  <Text style={[styles.tag, styles.tagGold]}>2 photos</Text>
-                  <Text style={[styles.tag, styles.tagGold]}>Lab quality</Text>
+              <View style={styles.productTop}>
+                <View style={[styles.productIcon, styles.productIconGold]}>
+                  <Text style={styles.productEmoji}>📦</Text>
+                </View>
+                <View style={styles.productInfo}>
+                  <Text style={[styles.productName, styles.productNameGold]}>Bundle — Single + 4×6</Text>
+                  <Text style={styles.productDesc}>
+                    Both files included · Single photo + 4×6 print sheet · Save 17%
+                  </Text>
+                  <View style={styles.productTags}>
+                    <Text style={[styles.tag, styles.tagGold]}>2 files</Text>
+                    <Text style={[styles.tag, styles.tagGold]}>Best deal</Text>
+                    <Text style={[styles.tag, styles.tagGold]}>No watermark</Text>
+                  </View>
                 </View>
               </View>
+              <TouchableOpacity
+                style={[styles.buyBtn, styles.buyBtnBundle]}
+                onPress={() => purchase('bundle')}
+                disabled={loading !== null}
+                activeOpacity={0.85}
+              >
+                {loading === 'bundle'
+                  ? <ActivityIndicator color="#0C0F1A" />
+                  : <Text style={styles.buyBtnBundleText}>Buy for <Text style={styles.buyBtnBundlePrice}>$2.49</Text></Text>
+                }
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity
-              style={[styles.buyBtn, styles.buyBtnPrimary]}
-              onPress={() => purchase('4x6')}
-              disabled={loading !== null}
-              activeOpacity={0.85}
-            >
-              {loading === '4x6'
-                ? <ActivityIndicator color="#0A1628" />
-                : <Text style={[styles.buyBtnText, styles.buyBtnTextDark]}>
-                    Buy for <Text style={styles.buyBtnPriceGold}>$1.50</Text>
+
+            {/* Single photo — $1.50 */}
+            <View style={styles.productCard}>
+              <View style={styles.productTop}>
+                <View style={styles.productIcon}>
+                  <Text style={styles.productEmoji}>🖼️</Text>
+                </View>
+                <View style={styles.productInfo}>
+                  <Text style={styles.productName}>Single Photo</Text>
+                  <Text style={styles.productDesc}>
+                    One passport photo · Full resolution · No watermark
                   </Text>
-              }
-            </TouchableOpacity>
+                  <View style={styles.productTags}>
+                    <Text style={styles.tag}>Print ready</Text>
+                    <Text style={styles.tag}>300+ DPI</Text>
+                    <Text style={styles.tag}>Instant</Text>
+                  </View>
+                </View>
+              </View>
+              <TouchableOpacity
+                style={[styles.buyBtn, styles.buyBtnSecondary]}
+                onPress={() => purchase('single')}
+                disabled={loading !== null}
+                activeOpacity={0.85}
+              >
+                {loading === 'single'
+                  ? <ActivityIndicator color="#A8B1CC" />
+                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.50</Text></Text>
+                }
+              </TouchableOpacity>
+            </View>
+
+            {/* 4×6 print sheet — $1.50 */}
+            <View style={styles.productCard}>
+              <View style={styles.productTop}>
+                <View style={styles.productIcon}>
+                  <Text style={styles.productEmoji}>🖨️</Text>
+                </View>
+                <View style={styles.productInfo}>
+                  <Text style={styles.productName}>4×6 Print Sheet</Text>
+                  <Text style={styles.productDesc}>
+                    2 photos on a 4×6 sheet · Take to any photo lab
+                  </Text>
+                  <View style={styles.productTags}>
+                    <Text style={styles.tag}>Print ready</Text>
+                    <Text style={styles.tag}>2 photos</Text>
+                    <Text style={styles.tag}>Lab quality</Text>
+                  </View>
+                </View>
+              </View>
+              <TouchableOpacity
+                style={[styles.buyBtn, styles.buyBtnSecondary]}
+                onPress={() => purchase('4x6')}
+                disabled={loading !== null}
+                activeOpacity={0.85}
+              >
+                {loading === '4x6'
+                  ? <ActivityIndicator color="#A8B1CC" />
+                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.50</Text></Text>
+                }
+              </TouchableOpacity>
+            </View>
+
           </View>
 
-        </View>
+          {/* Trust footer */}
+          <View style={styles.trust}>
+            <Text style={styles.trustText}>🔐  Secure payment via Google Play</Text>
+            <Text style={styles.trustText}>↩  No subscription · One-time purchase</Text>
+            <Text style={styles.trustText}>📸  Photo processed locally · Never stored</Text>
+          </View>
 
-        <View style={styles.trust}>
-          <Text style={styles.trustText}>{paymentCopy}</Text>
-          <Text style={styles.trustText}>↩  No subscription · One-time purchase</Text>
-          <Text style={styles.trustText}>📸  Photo processed locally · Never stored</Text>
-        </View>
+        </ScrollView>
 
       </SafeAreaView>
     </Modal>
@@ -179,11 +209,13 @@ const C = {
   bg: '#0C0F1A', surface: '#151929', border: '#1E2438',
   text1: '#F0F2FF', text2: '#A8B1CC', text3: '#6B7294',
   accent: '#2B59C3', accentLight: 'rgba(43,89,195,0.15)',
-  gold: '#F5A623', goldBg: 'rgba(245,166,35,0.10)',
+  gold: '#F5A623', goldBg: 'rgba(245,166,35,0.10)', goldBorder: 'rgba(245,166,35,0.35)',
 };
 
 const styles = StyleSheet.create({
   safe:               { flex: 1, backgroundColor: C.bg },
+  scrollContent:      { paddingBottom: 24 },
+
   header:             { flexDirection: 'row', alignItems: 'center',
                         backgroundColor: C.bg, padding: 20, paddingBottom: 16,
                         borderBottomWidth: 1, borderBottomColor: C.border },
@@ -194,22 +226,27 @@ const styles = StyleSheet.create({
                         backgroundColor: C.surface,
                         alignItems: 'center', justifyContent: 'center' },
   closeX:             { color: C.text3, fontSize: 14, fontWeight: '500' },
+
   noticeBanner:       { flexDirection: 'row', alignItems: 'center', gap: 10,
-                        backgroundColor: C.accentLight, margin: 16, borderRadius: 12,
+                        backgroundColor: C.accentLight, margin: 16, borderRadius: 10,
                         padding: 12, borderWidth: 1, borderColor: 'rgba(43,89,195,0.25)' },
   noticeIcon:         { fontSize: 16 },
   noticeText:         { flex: 1, fontSize: 12, color: '#4A7AE8', lineHeight: 17 },
+
   products:           { paddingHorizontal: 16, gap: 12 },
+
   productCard:        { backgroundColor: C.surface, borderRadius: 14, padding: 18,
                         borderWidth: 1, borderColor: C.border },
-  productCardFeatured:{ borderColor: C.gold, position: 'relative', marginTop: 8 },
-  featuredBadge:      { position: 'absolute', top: -11, alignSelf: 'center',
-                        backgroundColor: C.gold, borderRadius: 8,
+  productCardBundle:  { borderColor: C.goldBorder, borderWidth: 1.5, position: 'relative', marginTop: 4 },
+
+  bundleBadge:        { position: 'absolute', top: -11, alignSelf: 'center',
+                        backgroundColor: C.gold, borderRadius: 6,
                         paddingHorizontal: 12, paddingVertical: 3 },
-  featuredBadgeText:  { fontSize: 9, fontWeight: '700', color: '#0C0F1A', letterSpacing: 1.5 },
+  bundleBadgeText:    { fontSize: 9, fontWeight: '700', color: '#0C0F1A', letterSpacing: 1.5 },
+
   productTop:         { flexDirection: 'row', gap: 14, marginBottom: 16 },
-  productIcon:        { width: 44, height: 44, borderRadius: 12,
-                        backgroundColor: C.accentLight,
+  productIcon:        { width: 44, height: 44, borderRadius: 10,
+                        backgroundColor: 'rgba(43,89,195,0.10)',
                         alignItems: 'center', justifyContent: 'center' },
   productIconGold:    { backgroundColor: C.goldBg },
   productEmoji:       { fontSize: 22 },
@@ -218,17 +255,19 @@ const styles = StyleSheet.create({
   productNameGold:    { color: C.gold },
   productDesc:        { fontSize: 12, color: C.text3, lineHeight: 17, marginBottom: 8 },
   productTags:        { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  tag:                { backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 8,
+  tag:                { backgroundColor: 'rgba(43,89,195,0.08)', borderRadius: 6,
                         paddingHorizontal: 8, paddingVertical: 3,
-                        fontSize: 10, color: C.text2, fontWeight: '500' },
+                        fontSize: 10, color: C.text2, fontWeight: '500', overflow: 'hidden' },
   tagGold:            { backgroundColor: C.goldBg, color: C.gold },
+
   buyBtn:             { borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
-  buyBtnSecondary:    { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
-  buyBtnPrimary:      { backgroundColor: C.gold },
+  buyBtnSecondary:    { backgroundColor: 'rgba(43,89,195,0.10)', borderWidth: 1, borderColor: 'rgba(43,89,195,0.20)' },
+  buyBtnBundle:       { backgroundColor: C.gold },
   buyBtnText:         { fontSize: 14, fontWeight: '600', color: C.text2 },
-  buyBtnTextDark:     { color: '#0C0F1A' },
-  buyBtnPrice:        { fontSize: 15, fontWeight: '700' },
-  buyBtnPriceGold:    { fontSize: 15, fontWeight: '700', color: '#0C0F1A' },
+  buyBtnPrice:        { fontSize: 15, fontWeight: '700', color: C.text1 },
+  buyBtnBundleText:   { fontSize: 15, fontWeight: '700', color: '#0C0F1A' },
+  buyBtnBundlePrice:  { fontSize: 16, fontWeight: '800' },
+
   trust:              { padding: 24, gap: 6, marginTop: 8 },
   trustText:          { fontSize: 11, color: C.text3, textAlign: 'center', lineHeight: 18 },
 });

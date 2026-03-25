@@ -209,7 +209,7 @@ const s = StyleSheet.create({
   dosCard:     { flex: 1, borderRadius: 14, paddingTop: 10, paddingBottom: 12, paddingHorizontal: 10, alignItems: 'center', borderWidth: 1.5, position: 'relative' },
   dosCardWrong:{ backgroundColor: 'rgba(220,38,38,0.06)', borderColor: 'rgba(220,38,38,0.30)' },
   dosCardRight:{ backgroundColor: 'rgba(29,185,84,0.06)', borderColor: 'rgba(29,185,84,0.30)' },
-  dosPhoto:    { width: 90, height: 120, borderRadius: 10, marginBottom: 8 },
+  dosPhoto:    { width: 120, height: 80, borderRadius: 10, marginBottom: 8 },
   dosMarkWrap: { position: 'absolute', top: -6, right: -6, width: 22, height: 22, borderRadius: 11, backgroundColor: '#DC2626', alignItems: 'center', justifyContent: 'center', zIndex: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 3, elevation: 4 },
   dosMarkRight:{ backgroundColor: '#1DB954' },
   dosCross:    { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },

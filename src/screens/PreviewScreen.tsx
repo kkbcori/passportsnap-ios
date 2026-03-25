@@ -2,7 +2,7 @@
  * PreviewScreen v6.0 — On-Device Processing (no backend)
  * Uses NativeModules.PassportProcessor.makeSheet4x6() instead of HTTP fetch
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Image,
   SafeAreaView, ScrollView, Dimensions, Alert, ActivityIndicator, NativeModules, Linking, Platform,
@@ -40,10 +40,39 @@ export default function PreviewScreen() {
 
   const { w: PHOTO_W, h: PHOTO_H } = getPhotoSize(country);
   const [showOverlay, setShowOverlay] = useState(true);
+  const [autoToggle, setAutoToggle] = useState(true);
   const [saving2x2, setSaving2x2] = useState(false);
   const [showPaywall, setShowPaywall] = useState(false);
-  const [purchaseType, setPurchaseType] = useState<'single'|'4x6'|null>(null);
+  const [purchaseType, setPurchaseType] = useState<'single'|'4x6'|'bundle'|null>(null);
   const [saving4x6, setSaving4x6] = useState(false);
+  const [savingBundle, setSavingBundle] = useState(false);
+  const [preview4x6Uri, setPreview4x6Uri] = useState<string | null>(null);
+
+  // Generate 4x6 preview on mount for "What You Get" section
+  useEffect(() => {
+    const gen4x6Preview = async () => {
+      try {
+        const photoData = cleanBase64 ?? base64;
+        if (!photoData) return;
+        const data = await PassportProcessor.makeSheet4x6(photoData, country);
+        const previewPath = `${RNFS.CachesDirectoryPath}/preview_4x6_${Date.now()}.jpg`;
+        await RNFS.writeFile(previewPath, data.imageBase64, 'base64');
+        setPreview4x6Uri(`file://${previewPath}`);
+      } catch (e) {
+        // Silent fail — the section will just show the single photo
+      }
+    };
+    gen4x6Preview();
+  }, []);
+
+  // Auto-toggle overlay every 2 seconds
+  useEffect(() => {
+    if (!autoToggle) return;
+    const interval = setInterval(() => {
+      setShowOverlay(v => !v);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [autoToggle]);
 
   const save2x2 = () => { setPurchaseType('single'); setShowPaywall(true); };
 
@@ -75,6 +104,26 @@ export default function PreviewScreen() {
     } catch (e: any) {
       Alert.alert('Error', e.message ?? 'Could not create 4x6 sheet.');
     } finally { setSaving4x6(false); }
+  };
+
+  const saveBundle = async (photoData: string) => {
+    try {
+      setSavingBundle(true);
+      // Save single photo
+      const singlePath = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
+      await RNFS.writeFile(singlePath, photoData, 'base64');
+      await CameraRoll.save(`file://${singlePath}`, { type: 'photo' });
+
+      // Save 4x6 sheet
+      const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
+      const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
+      await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
+      await CameraRoll.save(`file://${sheetPath}`, { type: 'photo' });
+
+      Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message ?? 'Could not save bundle.');
+    } finally { setSavingBundle(false); }
   };
 
   const askForReview = () => {
@@ -124,35 +173,14 @@ export default function PreviewScreen() {
         </View>
 
         <TouchableOpacity style={[styles.toggleBtn, showOverlay && styles.toggleBtnActive]}
-          onPress={() => setShowOverlay(v => !v)} activeOpacity={0.8}>
+          onPress={() => {
+            setAutoToggle(false);  // Stop auto-toggle on manual tap
+            setShowOverlay(v => !v);
+          }} activeOpacity={0.8}>
           <Text style={[styles.toggleText, showOverlay && styles.toggleTextActive]}>
-            {showOverlay ? 'Hide overlay' : 'Show overlay'}
+            {showOverlay ? 'Overlay ON' : 'Overlay OFF'}{autoToggle ? '  ·  Auto' : ''}
           </Text>
         </TouchableOpacity>
-
-        {showOverlay && (
-          <View style={styles.legend}>
-            <Text style={styles.legendTitle}>Overlay guide</Text>
-            <View style={styles.legendRow}>
-              <View style={[styles.swatch, { borderColor: '#16A34A', backgroundColor: 'rgba(22,163,74,0.1)' }]} />
-              <Text style={styles.legendText}>
-                {country === 'CAN' ? 'Green line — top of head\nHead height: 31–36mm (chin to crown)'
-                  : ['GBR', 'SCH', 'DEU', 'ZAF'].includes(country) ? 'Green line — top of head\nHead height: 29–34mm (crown to chin)'
-                  : country === 'AUS' ? 'Green line — top of head\nFace height: exactly 33mm (chin to crown)'
-                  : 'Green lines — top of head & chin\nHead height: 1"–1⅜" (50–69%)'}
-              </Text>
-            </View>
-            <View style={styles.legendRow}>
-              <View style={[styles.swatch, { borderColor: '#2563EB', backgroundColor: 'rgba(37,99,235,0.1)' }]} />
-              <Text style={styles.legendText}>
-                {country === 'CAN' ? 'Blue lines — eye level zone\nEyes centred between the two blue guides'
-                  : ['GBR', 'SCH', 'DEU', 'ZAF'].includes(country) ? 'Blue lines — eye level zone\nEyes in upper-middle third of photo'
-                  : country === 'AUS' ? 'Blue lines — eye level zone\nEyes centred between the two blue guides'
-                  : 'Blue lines — eye level zone\nEyes: 1⅛"–1⅜" from bottom (56–69%)'}
-              </Text>
-            </View>
-          </View>
-        )}
 
         <View style={styles.checkCard}>
           <Text style={styles.checkTitle}>COMPLIANCE CHECKS</Text>
@@ -200,6 +228,29 @@ export default function PreviewScreen() {
           ))}
         </View>
 
+        {/* What You Get — user's actual photos */}
+        <View style={styles.wygSection}>
+          <Text style={styles.wygTitle}>WHAT YOU GET</Text>
+          <View style={styles.wygRow}>
+            <View style={styles.wygCard}>
+              <Image source={{ uri: processedUri }} style={styles.wygImgSingle} resizeMode="contain" />
+              <Text style={styles.wygLabel}>Single Photo</Text>
+              <Text style={styles.wygSub}>Print-ready, no watermark</Text>
+            </View>
+            <View style={styles.wygCard}>
+              {preview4x6Uri ? (
+                <Image source={{ uri: preview4x6Uri }} style={styles.wygImg4x6} resizeMode="contain" />
+              ) : (
+                <View style={[styles.wygImg4x6, styles.wygPlaceholder]}>
+                  <ActivityIndicator size="small" color={C.text3} />
+                </View>
+              )}
+              <Text style={styles.wygLabel}>4×6 Print Sheet</Text>
+              <Text style={styles.wygSub}>2 photos, ready for any lab</Text>
+            </View>
+          </View>
+        </View>
+
         <Text style={styles.dlTitle}>Download</Text>
 
         <TouchableOpacity style={styles.btn2x2} onPress={save2x2} disabled={saving2x2} activeOpacity={0.85}>
@@ -227,6 +278,21 @@ export default function PreviewScreen() {
           )}
         </TouchableOpacity>
 
+        {/* Bundle — both files */}
+        <TouchableOpacity style={styles.btnBundle} onPress={() => { setPurchaseType('bundle'); setShowPaywall(true); }}
+          disabled={savingBundle} activeOpacity={0.85}>
+          {savingBundle ? <ActivityIndicator color="#F5A623" /> : (
+            <>
+              <View style={styles.btnBundleBadge}><Text style={styles.btnBundleBadgeText}>BEST VALUE</Text></View>
+              <Text style={styles.btnBundleIcon}>📦</Text>
+              <View>
+                <Text style={styles.btnBundleLabel}>Save Both — Single + 4×6</Text>
+                <Text style={styles.btnBundleSub}>Everything you need · No watermark · $2.49</Text>
+              </View>
+            </>
+          )}
+        </TouchableOpacity>
+
         <TouchableOpacity style={styles.againBtn} onPress={() => navigation.navigate('CountrySelect')}>
           <Text style={styles.againText}>Start over</Text>
         </TouchableOpacity>
@@ -247,8 +313,10 @@ export default function PreviewScreen() {
       <PaywallScreen visible={showPaywall} onClose={() => setShowPaywall(false)} country={country}
         onPurchased={async (type) => {
           setShowPaywall(false);
-          if (type === 'single') { await doSave2x2(cleanBase64 ?? base64 ?? ''); }
-          else { await save4x6(cleanBase64 ?? base64 ?? ''); }
+          const photoData = cleanBase64 ?? base64 ?? '';
+          if (type === 'single') { await doSave2x2(photoData); }
+          else if (type === 'bundle') { await saveBundle(photoData); }
+          else { await save4x6(photoData); }
           askForReview();
         }}
       />
@@ -299,4 +367,23 @@ const styles = StyleSheet.create({
   testTitle:   { fontSize: 11, fontWeight: '700', color: C.gold, letterSpacing: 1, marginBottom: 10, textAlign: 'center' },
   testBtn:     { backgroundColor: 'rgba(245,166,35,0.10)', borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16, marginBottom: 8, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(245,166,35,0.30)' },
   testBtnText: { color: C.gold, fontSize: 14, fontWeight: '600' },
+
+  // What You Get
+  wygSection:  { alignSelf: 'stretch', marginTop: 20, marginBottom: 4 },
+  wygTitle:    { fontSize: 11, fontWeight: '700', color: C.gold, letterSpacing: 1.5, marginBottom: 12 },
+  wygRow:      { flexDirection: 'row', gap: 12 },
+  wygCard:     { flex: 1, backgroundColor: C.surface, borderRadius: 12, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  wygImgSingle:{ width: 100, height: 100, borderRadius: 6, marginBottom: 8 },
+  wygImg4x6:  { width: 80, height: 120, borderRadius: 6, marginBottom: 8 },
+  wygPlaceholder: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  wygLabel:    { fontSize: 12, fontWeight: '600', color: C.text1, marginBottom: 2 },
+  wygSub:      { fontSize: 10, color: C.text3, textAlign: 'center' },
+
+  // Bundle button
+  btnBundle:   { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: 'rgba(245,166,35,0.08)', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, alignSelf: 'stretch', marginBottom: 20, borderWidth: 1.5, borderColor: 'rgba(245,166,35,0.35)', position: 'relative', overflow: 'hidden' },
+  btnBundleBadge: { position: 'absolute', top: 0, right: 0, backgroundColor: C.gold, borderBottomLeftRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  btnBundleBadgeText: { fontSize: 8, fontWeight: '800', color: '#0C0F1A', letterSpacing: 0.5 },
+  btnBundleIcon: { fontSize: 20 },
+  btnBundleLabel: { color: C.gold, fontSize: 15, fontWeight: '700' },
+  btnBundleSub: { color: 'rgba(245,166,35,0.6)', fontSize: 11 },
 });
