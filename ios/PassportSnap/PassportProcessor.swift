@@ -673,7 +673,9 @@ class PassportProcessor: NSObject {
                     cropX = Int((Double(leftS) / scale).rounded())
                     cropY = Int((Double(topS)  / scale).rounded())
                     cropW = Int((Double(spec.outW) / scale).rounded())
-                    cropH = Int((Double(spec.outH) / scale).rounded())
+                    // Derive cropH from cropW using exact spec aspect ratio
+                    // to prevent independent rounding causing stretched output
+                    cropH = Int((Double(cropW) * Double(spec.outH) / Double(spec.outW)).rounded())
 
                 } else {
                     // Fallback: use Vision face box + hairMult (same as Android)
@@ -695,7 +697,9 @@ class PassportProcessor: NSObject {
                     cropX = Int((Double(leftS) / scale).rounded())
                     cropY = Int((Double(topS)  / scale).rounded())
                     cropW = Int((Double(spec.outW) / scale).rounded())
-                    cropH = Int((Double(spec.outH) / scale).rounded())
+                    // Derive cropH from cropW using exact spec aspect ratio
+                    // to prevent independent rounding causing stretched output
+                    cropH = Int((Double(cropW) * Double(spec.outH) / Double(spec.outW)).rounded())
                 }
 
                 // 9. Save + resolve
@@ -740,8 +744,20 @@ class PassportProcessor: NSObject {
 
                 let cx = min(max(cropX+pad, 0), pw-1)
                 let cy = min(max(cropY+pad, 0), ph-1)
-                let cw = min(cropW, pw-cx)
-                let ch = min(cropH, ph-cy)
+                // Derive ch from cw using the EXACT output aspect ratio.
+                // Independent min() clamping of cw and ch can produce different ratios
+                // → the final resize to outW×outH would then stretch the image.
+                let cwRaw = min(cropW, pw-cx)
+                // Always derive height from width to guarantee aspect ratio
+                let cw = cwRaw
+                let ch: Int
+                if outW > 0 {
+                    // Use exact ratio: ch = cw * outH / outW
+                    let chFromRatio = Int((Double(cw) * Double(outH) / Double(outW)).rounded())
+                    ch = min(chFromRatio, ph-cy)
+                } else {
+                    ch = min(cropH, ph-cy)
+                }
                 guard cw > 0 && ch > 0 else {
                     throw NSError(domain:"PP", code:21, userInfo:[NSLocalizedDescriptionKey:"Invalid crop"])
                 }

@@ -159,7 +159,9 @@ export default function AdjustScreen() {
       const cropX = Math.round((0 - (OVW / 2 + tx)) / scale + origW / 2);
       const cropY = Math.round((0 - (OVH / 2 + ty)) / scale + origH / 2);
       const cropW = Math.round(OVW / scale);
-      const cropH = Math.round(OVH / scale);
+      // Derive cropH from cropW using exact output aspect ratio — prevents
+      // independent Math.round() calls producing different ratios → stretch
+      const cropH = Math.round(cropW * outH / outW);
 
       const outW = country === 'CAN' ? 1200 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 900 : 600;
       const outH = country === 'CAN' ? 1680 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 1200 : 600;
