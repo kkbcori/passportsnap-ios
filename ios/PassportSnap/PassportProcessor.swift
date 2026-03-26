@@ -245,13 +245,11 @@ class PassportProcessor: NSObject {
 
     @available(iOS 15.0, *)
     private func segmentationRemoval(image: UIImage) -> UIImage {
-        // Build CIImage from UIImage — this correctly handles imageOrientation
         let inputCI = CIImage(image: image) ?? CIImage(cgImage: image.cgImage!)
 
         // ── 1. Run person segmentation ────────────────────────────────────────
         var maskBuffer: CVPixelBuffer?
         let sem = DispatchSemaphore(value: 0)
-
         let request = VNGeneratePersonSegmentationRequest { req, _ in
             defer { sem.signal() }
             guard let obs = req.results?.first as? VNPixelBufferObservation else { return }
@@ -259,48 +257,102 @@ class PassportProcessor: NSObject {
         }
         request.qualityLevel = .accurate
         request.outputPixelFormat = kCVPixelFormatType_OneComponent32Float
-
-        // Use CIImage-based handler — handles orientation automatically
-        let handler = VNImageRequestHandler(ciImage: inputCI, options: [:])
-        try? handler.perform([request])
+        try? VNImageRequestHandler(ciImage: inputCI, options: [:]).perform([request])
         sem.wait()
 
-        guard let buf = maskBuffer else {
+        guard let buf = maskBuffer else { return toneCurveFallback(image: image) }
+
+        // ── 2. Read mask pixels from CVPixelBuffer ────────────────────────────
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        let mW  = CVPixelBufferGetWidth(buf)
+        let mH  = CVPixelBufferGetHeight(buf)
+        guard let base = CVPixelBufferGetBaseAddress(buf), mW > 0, mH > 0 else {
             return toneCurveFallback(image: image)
         }
+        let ptr = base.assumingMemoryBound(to: Float32.self)
+        let fpr = CVPixelBufferGetBytesPerRow(buf) / MemoryLayout<Float32>.size
+        // Copy into flat array (row-stride may differ from width)
+        var rawMask = [Float](repeating: 0, count: mW * mH)
+        for row in 0..<mH {
+            for col in 0..<mW {
+                rawMask[row * mW + col] = ptr[row * fpr + col]
+            }
+        }
 
-        // ── 2. Convert mask pixel buffer → CIImage ────────────────────────────
-        // Vision returns mask in its own coordinate space. CIImage(cvPixelBuffer:)
-        // + scaledToFit brings it to the same space as inputCI automatically.
-        var maskCI = CIImage(cvPixelBuffer: buf)
+        // ── 3. BFS from borders — only remove CONNECTED background ───────────
+        // Background pixels (mask < 0.5) reachable from any image border get
+        // marked as "remove". Background pixels enclosed inside the person
+        // (collar shadows, dark fabric folds) are NOT reachable from the border
+        // → they stay as person = 1.0 in the output mask.
+        var finalMask = [Float](repeating: 1.0, count: mW * mH)  // default: person
+        var visited   = [Bool](repeating: false, count: mW * mH)
+        var queue     = [Int]()
+        queue.reserveCapacity(mW * 2 + mH * 2)
 
-        // Scale mask to match input image dimensions
-        let inputW = inputCI.extent.width
-        let inputH = inputCI.extent.height
-        let maskW  = maskCI.extent.width
-        let maskH  = maskCI.extent.height
-        let scaleX = inputW / maskW
-        let scaleY = inputH / maskH
-        maskCI = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+        func tryEnqueue(_ idx: Int) {
+            guard idx >= 0, idx < rawMask.count,
+                  !visited[idx], rawMask[idx] < 0.5 else { return }
+            visited[idx]   = true
+            finalMask[idx] = 0.0   // background — remove
+            queue.append(idx)
+        }
 
-        // ── 3. Composite: person over white using mask ────────────────────────
-        // CIBlendWithMask: output = foreground * mask + background * (1 - mask)
-        // foreground = original image, background = solid white, mask = person mask
+        // Seed all 4 borders
+        for x in 0..<mW { tryEnqueue(x); tryEnqueue((mH-1)*mW + x) }
+        for y in 1..<(mH-1) { tryEnqueue(y*mW); tryEnqueue(y*mW + mW-1) }
+
+        // BFS — 4-connected
+        var qi = 0
+        while qi < queue.count {
+            let idx = queue[qi]; qi += 1
+            let x = idx % mW; let y = idx / mW
+            if x > 0    { tryEnqueue(idx - 1)  }
+            if x < mW-1 { tryEnqueue(idx + 1)  }
+            if y > 0    { tryEnqueue(idx - mW) }
+            if y < mH-1 { tryEnqueue(idx + mW) }
+        }
+        // finalMask: 1.0 = person (keep), 0.0 = border-connected background (remove)
+        // Interior dark holes (collar shadow etc.) = 1.0 → kept as person ✓
+
+        // ── 4. Build CIImage from final mask ──────────────────────────────────
+        // Allocate a new CVPixelBuffer for the cleaned mask
+        var cleanBuf: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, mW, mH,
+                            kCVPixelFormatType_OneComponent32Float,
+                            [kCVPixelBufferCGImageCompatibilityKey: true,
+                             kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary,
+                            &cleanBuf)
+        guard let cb = cleanBuf else { return toneCurveFallback(image: image) }
+
+        CVPixelBufferLockBaseAddress(cb, [])
+        let cbPtr  = CVPixelBufferGetBaseAddress(cb)!.assumingMemoryBound(to: Float32.self)
+        let cbFpr  = CVPixelBufferGetBytesPerRow(cb) / MemoryLayout<Float32>.size
+        for row in 0..<mH {
+            for col in 0..<mW {
+                cbPtr[row * cbFpr + col] = finalMask[row * mW + col]
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(cb, [])
+
+        var maskCI = CIImage(cvPixelBuffer: cb)
+
+        // Scale mask to match input image size
+        let inputW = inputCI.extent.width; let inputH = inputCI.extent.height
+        let sX = inputW / maskCI.extent.width; let sY = inputH / maskCI.extent.height
+        maskCI = maskCI.transformed(by: CGAffineTransform(scaleX: sX, y: sY))
+
+        // ── 5. Composite: person over white ───────────────────────────────────
         let white = CIImage(color: CIColor.white).cropped(to: inputCI.extent)
-
         guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
             return toneCurveFallback(image: image)
         }
-        blendFilter.setValue(inputCI,  forKey: "inputImage")       // person (foreground)
-        blendFilter.setValue(white,    forKey: "inputBackgroundImage") // white background
-        blendFilter.setValue(maskCI,   forKey: "inputMaskImage")   // person mask
+        blendFilter.setValue(inputCI, forKey: "inputImage")
+        blendFilter.setValue(white,   forKey: "inputBackgroundImage")
+        blendFilter.setValue(maskCI,  forKey: "inputMaskImage")
 
-        guard let outputCI = blendFilter.outputImage else {
-            return toneCurveFallback(image: image)
-        }
-
-        // ── 4. Render back to UIImage ─────────────────────────────────────────
-        guard let cgOut = ciContext.createCGImage(outputCI, from: outputCI.extent) else {
+        guard let outputCI = blendFilter.outputImage,
+              let cgOut = ciContext.createCGImage(outputCI, from: outputCI.extent) else {
             return toneCurveFallback(image: image)
         }
         return UIImage(cgImage: cgOut)
