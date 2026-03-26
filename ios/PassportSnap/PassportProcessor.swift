@@ -224,10 +224,6 @@ class PassportProcessor: NSObject {
     }
 
     // MARK: ── Background Removal ─────────────────────────────────────────────
-    // Uses VNGeneratePersonSegmentationRequest (Apple Neural Engine) on iOS 15+.
-    // The ML model classifies every pixel as person vs background — it correctly
-    // handles white shirts on white walls, shadows, coloured clothing, all cases.
-    // Fallback for iOS 14: CIToneCurve highlight-lift (good for near-white bg only).
 
     private func whitenBackground(image: UIImage, faceCx: Int) -> UIImage {
         if #available(iOS 15.0, *) {
@@ -237,116 +233,80 @@ class PassportProcessor: NSObject {
     }
 
     // MARK: ── ML Segmentation (iOS 15+) ──────────────────────────────────────
+    // Complete rewrite using CIImage pipeline — avoids all manual pixel/mask issues.
+    // 
+    // Key decisions:
+    // 1. Feed CIImage(image:) to Vision — CIImage respects UIImage.imageOrientation
+    //    automatically, so no manual orientation handling needed at all.
+    // 2. Use CIFilter("CIBlendWithMask") for compositing — Apple's own API, correct
+    //    coordinate space, no manual upsampling or pixel loops.
+    // 3. The mask pixel buffer is converted to CIImage directly — Core Image
+    //    handles all the scaling/coordinate mapping internally.
 
     @available(iOS 15.0, *)
     private func segmentationRemoval(image: UIImage) -> UIImage {
-        guard let cgImage = image.cgImage else { return image }
-        let w = cgImage.width; let h = cgImage.height
+        // Build CIImage from UIImage — this correctly handles imageOrientation
+        let inputCI = CIImage(image: image) ?? CIImage(cgImage: image.cgImage!)
 
-        // ── 1. Run VNGeneratePersonSegmentationRequest ────────────────────────
-        // Pass CGImagePropertyOrientation so Vision interprets the image correctly.
-        // UIImage.imageOrientation → CGImagePropertyOrientation mapping needed
-        // because fixOrientation() already normalised the pixels — pass .up.
-        var maskPixels: [Float]?
-        var maskW = 0; var maskH = 0
+        // ── 1. Run person segmentation ────────────────────────────────────────
+        var maskBuffer: CVPixelBuffer?
         let sem = DispatchSemaphore(value: 0)
 
         let request = VNGeneratePersonSegmentationRequest { req, _ in
             defer { sem.signal() }
             guard let obs = req.results?.first as? VNPixelBufferObservation else { return }
-            let buf = obs.pixelBuffer
-            CVPixelBufferLockBaseAddress(buf, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
-            maskW = CVPixelBufferGetWidth(buf)
-            maskH = CVPixelBufferGetHeight(buf)
-            guard let base = CVPixelBufferGetBaseAddress(buf) else { return }
-            let ptr = base.assumingMemoryBound(to: Float32.self)
-            let fpr = CVPixelBufferGetBytesPerRow(buf) / MemoryLayout<Float32>.size
-            var flat = [Float](repeating: 0, count: maskW * maskH)
-            for row in 0..<maskH {
-                for col in 0..<maskW {
-                    flat[row * maskW + col] = ptr[row * fpr + col]
-                }
-            }
-            maskPixels = flat
+            maskBuffer = obs.pixelBuffer
         }
         request.qualityLevel = .accurate
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent32Float
 
-        // fixOrientation() already rendered pixels upright — always pass .up
-        let handler = VNImageRequestHandler(cgImage: cgImage,
-                                            orientation: .up,
-                                            options: [:])
+        // Use CIImage-based handler — handles orientation automatically
+        let handler = VNImageRequestHandler(ciImage: inputCI, options: [:])
         try? handler.perform([request])
         sem.wait()
 
-        guard let rawMask = maskPixels, maskW > 0, maskH > 0 else {
+        guard let buf = maskBuffer else {
             return toneCurveFallback(image: image)
         }
 
-        // ── 2. The mask from VNGeneratePersonSegmentationRequest is already in
-        //        image-space coordinates when .up orientation is passed — NO flip needed.
-        //        (The previous vertical flip was compensating for a wrong orientation.)
+        // ── 2. Convert mask pixel buffer → CIImage ────────────────────────────
+        // Vision returns mask in its own coordinate space. CIImage(cvPixelBuffer:)
+        // + scaledToFit brings it to the same space as inputCI automatically.
+        var maskCI = CIImage(cvPixelBuffer: buf)
 
-        // ── 3. Upsample mask to image size (bilinear interpolation) ──────────
-        var mask = [Float](repeating: 0, count: w * h)
-        let scaleX = Double(maskW) / Double(w)
-        let scaleY = Double(maskH) / Double(h)
-        for py in 0..<h {
-            let my = Double(py) * scaleY
-            let my0 = max(0, Int(my)); let my1 = min(maskH-1, my0+1)
-            let fy = Float(my - Double(my0))
-            for px in 0..<w {
-                let mx = Double(px) * scaleX
-                let mx0 = max(0, Int(mx)); let mx1 = min(maskW-1, mx0+1)
-                let fx = Float(mx - Double(mx0))
-                mask[py*w+px] = rawMask[my0*maskW+mx0] * (1-fx) * (1-fy)
-                              + rawMask[my0*maskW+mx1] *    fx  * (1-fy)
-                              + rawMask[my1*maskW+mx0] * (1-fx) *    fy
-                              + rawMask[my1*maskW+mx1] *    fx  *    fy
-            }
+        // Scale mask to match input image dimensions
+        let inputW = inputCI.extent.width
+        let inputH = inputCI.extent.height
+        let maskW  = maskCI.extent.width
+        let maskH  = maskCI.extent.height
+        let scaleX = inputW / maskW
+        let scaleY = inputH / maskH
+        maskCI = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+        // ── 3. Composite: person over white using mask ────────────────────────
+        // CIBlendWithMask: output = foreground * mask + background * (1 - mask)
+        // foreground = original image, background = solid white, mask = person mask
+        let white = CIImage(color: CIColor.white).cropped(to: inputCI.extent)
+
+        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
+            return toneCurveFallback(image: image)
+        }
+        blendFilter.setValue(inputCI,  forKey: "inputImage")       // person (foreground)
+        blendFilter.setValue(white,    forKey: "inputBackgroundImage") // white background
+        blendFilter.setValue(maskCI,   forKey: "inputMaskImage")   // person mask
+
+        guard let outputCI = blendFilter.outputImage else {
+            return toneCurveFallback(image: image)
         }
 
-        // ── 4. Remap mask: soft S-curve, no hard threshold ───────────────────
-        // Hard threshold at 0.5 was cutting face pixels near cream backgrounds
-        // (Vision gives them 0.3–0.4 confidence) → face wiped to white → grey lines.
-        // Instead: remap raw mask with soft curve:
-        //   raw < 0.15 → 0.0 (definite background)
-        //   raw > 0.85 → 1.0 (definite person)
-        //   middle     → smooth S-curve blend
-        // No Gaussian blur — Vision mask is already spatially smooth at high quality.
-        var softMask = [Float](repeating: 0, count: w * h)
-        for i in 0..<(w*h) {
-            let v = mask[i]
-            if v <= 0.15      { softMask[i] = 0.0 }
-            else if v >= 0.85 { softMask[i] = 1.0 }
-            else {
-                // Smooth step: 3t²−2t³
-                let t = (v - 0.15) / (0.85 - 0.15)
-                softMask[i] = t * t * (3 - 2 * t)
-            }
+        // ── 4. Render back to UIImage ─────────────────────────────────────────
+        guard let cgOut = ciContext.createCGImage(outputCI, from: outputCI.extent) else {
+            return toneCurveFallback(image: image)
         }
-
-        // ── 5. Composite person onto white ───────────────────────────────────
-        var pixels = extractPixels(cgImage)
-        for i in 0..<(w * h) {
-            let alpha = softMask[i]   // 1.0 = person, 0.0 = background
-            guard alpha < 0.999 else { continue }
-            let pi = i * 4
-            if alpha <= 0.001 {
-                pixels[pi]=255; pixels[pi+1]=255; pixels[pi+2]=255
-            } else {
-                let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
-                pixels[pi]   = UInt8((r*alpha + 255*(1-alpha)).clamped(to: 0...255))
-                pixels[pi+1] = UInt8((g*alpha + 255*(1-alpha)).clamped(to: 0...255))
-                pixels[pi+2] = UInt8((b*alpha + 255*(1-alpha)).clamped(to: 0...255))
-            }
-        }
-        return rebuildImage(pixels: pixels, width: w, height: h) ?? image
+        return UIImage(cgImage: cgOut)
     }
 
     // MARK: ── Tone Curve Fallback (iOS 14) ───────────────────────────────────
-    // Lifts near-white background highlights to white.
-    // Only effective for light-coloured backgrounds (cream, grey, off-white).
 
     private func toneCurveFallback(image: UIImage) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
