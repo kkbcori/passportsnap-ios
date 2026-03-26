@@ -306,15 +306,25 @@ class PassportProcessor: NSObject {
             }
         }
 
-        // ── 4. Threshold to binary + tiny blur only on boundary ──────────────
-        // Hard threshold at 0.5 first — prevents blur spreading low-confidence
-        // mask values (face near cream bg) inward → white patches on face.
-        // Then small Gaussian blur ONLY on the boundary zone (mask 0.3–0.7)
-        // to smooth hair/skin edges without affecting confident regions.
-        var threshMask = [Float](repeating: 0, count: w * h)
-        for i in 0..<(w*h) { threshMask[i] = mask[i] >= 0.5 ? 1.0 : 0.0 }
-        let blurR = max(2, min(w, h) / 300)
-        let softMask = gaussianBlurMask(threshMask, w: w, h: h, radius: blurR)
+        // ── 4. Remap mask: soft S-curve, no hard threshold ───────────────────
+        // Hard threshold at 0.5 was cutting face pixels near cream backgrounds
+        // (Vision gives them 0.3–0.4 confidence) → face wiped to white → grey lines.
+        // Instead: remap raw mask with soft curve:
+        //   raw < 0.15 → 0.0 (definite background)
+        //   raw > 0.85 → 1.0 (definite person)
+        //   middle     → smooth S-curve blend
+        // No Gaussian blur — Vision mask is already spatially smooth at high quality.
+        var softMask = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w*h) {
+            let v = mask[i]
+            if v <= 0.15      { softMask[i] = 0.0 }
+            else if v >= 0.85 { softMask[i] = 1.0 }
+            else {
+                // Smooth step: 3t²−2t³
+                let t = (v - 0.15) / (0.85 - 0.15)
+                softMask[i] = t * t * (3 - 2 * t)
+            }
+        }
 
         // ── 5. Composite person onto white ───────────────────────────────────
         var pixels = extractPixels(cgImage)
