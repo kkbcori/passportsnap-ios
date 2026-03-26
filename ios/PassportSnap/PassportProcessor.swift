@@ -28,6 +28,7 @@ import CoreGraphics
 class PassportProcessor: NSObject {
 
     private let queue = DispatchQueue(label: "com.passportsnap.processor", qos: .userInitiated)
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     @objc static func requiresMainQueueSetup() -> Bool { false }
 
     // MARK: ── Country Specs ───────────────────────────────────────────────────
@@ -223,226 +224,154 @@ class PassportProcessor: NSObject {
     }
 
     // MARK: ── Background Removal ─────────────────────────────────────────────
-    // Uses flood-fill from image borders — same as web fallback, works for all
-    // background colours without relying on ML mask quality.
+    // Uses VNGeneratePersonSegmentationRequest (Apple Neural Engine) on iOS 15+.
+    // The ML model classifies every pixel as person vs background — it correctly
+    // handles white shirts on white walls, shadows, coloured clothing, all cases.
+    // Fallback for iOS 14: CIToneCurve highlight-lift (good for near-white bg only).
 
     private func whitenBackground(image: UIImage, faceCx: Int) -> UIImage {
-        return floodFillBackgroundRemoval(image: image)
+        if #available(iOS 15.0, *) {
+            return segmentationRemoval(image: image)
+        }
+        return toneCurveFallback(image: image)
     }
 
-    /// Flood-fill background removal — mirrors web removeBackgroundFallback().
-    /// 1. Sample background colour from image corners
-    /// 2. BFS flood-fill from all 4 image borders through pixels similar to bg colour
-    /// 3. Gaussian-soften the mask edge for smooth hair/skin transitions
-    /// 4. Composite result onto pure white
-    private func floodFillBackgroundRemoval(image: UIImage) -> UIImage {
+    // MARK: ── ML Segmentation (iOS 15+) ──────────────────────────────────────
+
+    @available(iOS 15.0, *)
+    private func segmentationRemoval(image: UIImage) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
         let w = cgImage.width; let h = cgImage.height
-        var pixels = extractPixels(cgImage)
-        guard !pixels.isEmpty else { return image }
 
-        // ── 1. Smart background colour sampling ──────────────────────────────
-        // Corners are WRONG when dark hair or clothing fills them (very common).
-        // Instead: sample top 12% strip + left/right 10% strips (top 60% only).
-        // Then filter to keep only BRIGHT (lum>150) AND ACHROMATIC (sat<0.15) pixels
-        // — walls/backgrounds are always bright and low-saturation vs hair/clothing.
-        var candidates: [(Float,Float,Float)] = []
-        let topRows = max(1, h / 8)
-        let sideW   = max(1, w / 10)
+        // ── 1. Run VNGeneratePersonSegmentationRequest ────────────────────────
+        var maskPixels: [Float]?
+        var maskW = 0; var maskH = 0
+        let sem = DispatchSemaphore(value: 0)
 
-        // Top strip — full width
-        for y in 0..<topRows {
-            for x in stride(from: 0, to: w, by: max(1, w/40)) {
-                let i = (y*w+x)*4
-                candidates.append((Float(pixels[i]), Float(pixels[i+1]), Float(pixels[i+2])))
+        let request = VNGeneratePersonSegmentationRequest { req, _ in
+            defer { sem.signal() }
+            guard let obs = req.results?.first as? VNPixelBufferObservation else { return }
+            let buf = obs.pixelBuffer
+            CVPixelBufferLockBaseAddress(buf, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+            maskW = CVPixelBufferGetWidth(buf)
+            maskH = CVPixelBufferGetHeight(buf)
+            guard let base = CVPixelBufferGetBaseAddress(buf) else { return }
+            let ptr      = base.assumingMemoryBound(to: Float32.self)
+            let bpr      = CVPixelBufferGetBytesPerRow(buf)
+            let fpr      = bpr / MemoryLayout<Float32>.size
+            var flat     = [Float](repeating: 0, count: maskW * maskH)
+            for row in 0..<maskH {
+                for col in 0..<maskW {
+                    flat[row * maskW + col] = ptr[row * fpr + col]
+                }
             }
+            maskPixels = flat
         }
-        // Left + right strips — top 60% of image
-        for y in stride(from: 0, to: h*6/10, by: max(1, h/40)) {
-            for x in 0..<sideW {
-                let i = (y*w+x)*4
-                candidates.append((Float(pixels[i]), Float(pixels[i+1]), Float(pixels[i+2])))
-            }
-            for x in (w-sideW)..<w {
-                let i = (y*w+x)*4
-                candidates.append((Float(pixels[i]), Float(pixels[i+1]), Float(pixels[i+2])))
-            }
-        }
+        request.qualityLevel = .accurate
+        try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+        sem.wait()
 
-        // Filter: keep bright + achromatic candidates (background wall pixels)
-        var bgCands = candidates.filter { r, g, b in
-            let lum = 0.299*r + 0.587*g + 0.114*b
-            let maxC = max(r, max(g, b)); let minC = min(r, min(g, b))
-            let sat = maxC > 0 ? (maxC - minC) / maxC : 0
-            return lum > 150 && sat < 0.18
-        }
-        if bgCands.count < 10 { bgCands = candidates } // fallback: use all samples
-        let bgR = bgCands.map{$0.0}.reduce(0,+) / Float(bgCands.count)
-        let bgG = bgCands.map{$0.1}.reduce(0,+) / Float(bgCands.count)
-        let bgB = bgCands.map{$0.2}.reduce(0,+) / Float(bgCands.count)
-
-        // ── 2. Per-pixel distance to background ───────────────────────────────
-        var dist = [Float](repeating: 0, count: w * h)
-        for i in 0..<(w*h) {
-            let pi = i*4
-            let dr = Float(pixels[pi]) - bgR
-            let dg = Float(pixels[pi+1]) - bgG
-            let db = Float(pixels[pi+2]) - bgB
-            dist[i] = sqrt(dr*dr + dg*dg + db*db)
+        guard let rawMask = maskPixels, maskW > 0, maskH > 0 else {
+            return toneCurveFallback(image: image)  // ML failed — use fallback
         }
 
-        // ── 3. Adaptive tolerance ─────────────────────────────────────────────
-        var borderDists = [Float]()
-        for x in 0..<w { borderDists.append(dist[x]); borderDists.append(dist[(h-1)*w+x]) }
-        for y in 1..<(h-1) { borderDists.append(dist[y*w]); borderDists.append(dist[y*w+w-1]) }
-        borderDists.sort()
-        let medianBorder = borderDists[borderDists.count / 2]
-        let TOL: Float  = max(25.0, min(65.0, medianBorder * 2.5 + 20.0))
-        let TOL2: Float = TOL * 1.35  // second pass — catches enclosed shoulder pockets
-
-        var bgMask = [Bool](repeating: false, count: w * h)
-        var queue = [Int](); queue.reserveCapacity(w * 2 + h * 2)
-
-        // ── 4a. Pass 1: BFS from all 4 borders (tight TOL) ───────────────────
-        // Also expand pass1 into achromatic pixels slightly outside TOL
-        // This handles cream bg pixels that sit at dist=TOL+5 due to
-        // lighting variation (corners vs centre of wall).
-        let TOL_ACHROMATIC: Float = TOL * 1.15  // 15% looser but ONLY for achromatic pixels
-
-        func enqueueOrAchromatic(_ idx: Int) {
-            guard idx >= 0, idx < bgMask.count, !bgMask[idx] else { return }
-            let d = dist[idx]
-            if d < TOL {
-                bgMask[idx] = true; queue.append(idx); return
-            }
-            // Achromatic bonus: slightly brighter tolerance for low-saturation pixels
-            if d < TOL_ACHROMATIC {
-                let pi = idx * 4
-                let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
-                let maxC = max(r, max(g, b)); let minC = min(r, min(g, b))
-                let sat = maxC > 0 ? (maxC - minC) / maxC : 0
-                if sat < 0.12 { bgMask[idx] = true; queue.append(idx) }
+        // ── 2. Upsample mask to image size (bilinear) ────────────────────────
+        var mask = [Float](repeating: 0, count: w * h)
+        let scaleX = Double(maskW) / Double(w)
+        let scaleY = Double(maskH) / Double(h)
+        for py in 0..<h {
+            let my = Double(py) * scaleY
+            let my0 = max(0, Int(my)); let my1 = min(maskH-1, my0+1)
+            let fy = Float(my - Double(my0))
+            for px in 0..<w {
+                let mx = Double(px) * scaleX
+                let mx0 = max(0, Int(mx)); let mx1 = min(maskW-1, mx0+1)
+                let fx = Float(mx - Double(mx0))
+                let v  = rawMask[my0*maskW+mx0] * (1-fx) * (1-fy)
+                       + rawMask[my0*maskW+mx1] *    fx  * (1-fy)
+                       + rawMask[my1*maskW+mx0] * (1-fx) *    fy
+                       + rawMask[my1*maskW+mx1] *    fx  *    fy
+                mask[py*w+px] = v
             }
         }
 
-        for x in 0..<w { enqueueOrAchromatic(x); enqueueOrAchromatic((h-1)*w+x) }
-        for y in 1..<(h-1) { enqueueOrAchromatic(y*w); enqueueOrAchromatic(y*w+w-1) }
-        var qi = 0
-        while qi < queue.count {
-            let idx = queue[qi]; qi += 1
-            let x = idx % w; let y = idx / w
-            if x > 0   { enqueueOrAchromatic(idx-1) }
-            if x < w-1 { enqueueOrAchromatic(idx+1) }
-            if y > 0   { enqueueOrAchromatic(idx-w) }
-            if y < h-1 { enqueueOrAchromatic(idx+w) }
-        }
-
-        // ── 4b. Pass 2: Expand from fill boundary, achromatic pixels only ────
-        // Catches shoulder background pockets enclosed by dark jacket at border.
-        // CRITICAL: only expand into LOW-SATURATION pixels (sat < 0.20).
-        // Pink shirts (sat~0.39) and blue shirts (sat~0.51) are rejected.
-        // Background walls (sat~0.04–0.11) are accepted.
-        func saturation(_ idx: Int) -> Float {
-            let pi = idx * 4
-            let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
-            let maxC = max(r, max(g, b)); let minC = min(r, min(g, b))
-            return maxC > 0 ? (maxC - minC) / maxC : 0
-        }
-
-        func enqueueAchromatic(_ idx: Int, tol: Float) {
-            guard idx >= 0, idx < bgMask.count, !bgMask[idx],
-                  dist[idx] < tol, saturation(idx) < 0.20 else { return }
-            bgMask[idx] = true; queue.append(idx)
-        }
-
-        queue.removeAll(keepingCapacity: true)
-        for idx in 0..<(w*h) {
-            guard bgMask[idx] else { continue }
-            let x = idx % w; let y = idx / w
-            for n in [x>0 ? idx-1:-1, x<w-1 ? idx+1:-1, y>0 ? idx-w:-1, y<h-1 ? idx+w:-1] {
-                enqueueAchromatic(n, tol: TOL2)
-            }
-        }
-        qi = 0
-        while qi < queue.count {
-            let idx = queue[qi]; qi += 1
-            let x = idx % w; let y = idx / w
-            if x > 0   { enqueueAchromatic(idx-1, tol: TOL2) }
-            if x < w-1 { enqueueAchromatic(idx+1, tol: TOL2) }
-            if y > 0   { enqueueAchromatic(idx-w, tol: TOL2) }
-            if y < h-1 { enqueueAchromatic(idx+w, tol: TOL2) }
-        }
-
-        // ── 4. Gaussian-soften the mask edge for smooth transitions ───────────
-        var floatMask = [Float](repeating: 0, count: w*h)
-        for i in 0..<(w*h) { floatMask[i] = bgMask[i] ? 1.0 : 0.0 }
+        // ── 3. Soft edge: small Gaussian blur on mask boundary ───────────────
+        // Blur radius = 0.5% of shorter side → smooth hair/skin edges
         let blurR = max(3, min(w, h) / 200)
-        let softMask = gaussianBlurMask(floatMask, w: w, h: h, radius: blurR)
+        let softMask = gaussianBlurMask(mask, w: w, h: h, radius: blurR)
 
-        // ── 5. Apply: blend bg pixels toward white ────────────────────────────
-        for i in 0..<(w*h) {
-            let alpha = softMask[i]  // 0 = person (keep), 1 = background (whiten)
-            guard alpha > 0.02 else { continue }
+        // ── 4. Composite person onto white ───────────────────────────────────
+        // mask=1 → person (keep), mask=0 → background (white)
+        // Simple alpha blend: result = person * mask + white * (1 - mask)
+        var pixels = extractPixels(cgImage)
+        for i in 0..<(w * h) {
+            let alpha = softMask[i]          // 1.0 = fully person, 0.0 = fully background
+            guard alpha < 0.999 else { continue }  // fully person — skip
             let pi = i * 4
-            let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
-            if alpha >= 0.98 {
+            if alpha <= 0.001 {              // fully background — pure white
                 pixels[pi]=255; pixels[pi+1]=255; pixels[pi+2]=255
-            } else {
-                pixels[pi]   = UInt8((r*(1-alpha) + 255*alpha).clamped(to: 0...255))
-                pixels[pi+1] = UInt8((g*(1-alpha) + 255*alpha).clamped(to: 0...255))
-                pixels[pi+2] = UInt8((b*(1-alpha) + 255*alpha).clamped(to: 0...255))
+            } else {                         // soft edge — blend
+                let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
+                pixels[pi]   = UInt8((r * alpha + 255 * (1-alpha)).clamped(to: 0...255))
+                pixels[pi+1] = UInt8((g * alpha + 255 * (1-alpha)).clamped(to: 0...255))
+                pixels[pi+2] = UInt8((b * alpha + 255 * (1-alpha)).clamped(to: 0...255))
             }
         }
-
         return rebuildImage(pixels: pixels, width: w, height: h) ?? image
     }
 
-    private func pixelLevelFallback(image: UIImage) -> UIImage {
-        guard let cg = image.cgImage else { return image }
-        var px = extractPixels(cg)
-        let w = cg.width; let h = cg.height
-        // Sample bg colour from corners + top strip
-        var rS=0, gS=0, bS=0, n=0
-        let sz = max(8, min(w,h)/12)
-        for y in 0..<sz { for x in 0..<sz {
-            for (cx,cy) in [(x,y),(w-1-x,y),(x,h-1-y),(w-1-x,h-1-y)] {
-                let i=(cy*w+cx)*4; rS+=Int(px[i]); gS+=Int(px[i+1]); bS+=Int(px[i+2]); n+=1
-            }
-        }}
-        let bgR=Float(rS/max(n,1)), bgG=Float(gS/max(n,1)), bgB=Float(bS/max(n,1))
-        for i in stride(from:0, to:px.count-3, by:4) {
-            let r=Float(px[i]),g=Float(px[i+1]),b=Float(px[i+2])
-            let dist = sqrt(pow(r-bgR,2)+pow(g-bgG,2)+pow(b-bgB,2))
-            if dist < 35 {
-                // Skip skin-toned pixels — never whiten face even in fallback
-                let Y  =  0.299*r + 0.587*g + 0.114*b
-                let Cb = -0.169*r - 0.331*g + 0.500*b + 128
-                let Cr =  0.500*r - 0.419*g - 0.081*b + 128
-                if !(Y > 30 && Y < 242 && Cb > 60 && Cb < 140 && Cr > 128 && Cr < 190) {
-                    px[i]=255; px[i+1]=255; px[i+2]=255
-                }
-            }
+    // MARK: ── Tone Curve Fallback (iOS 14) ───────────────────────────────────
+    // Lifts near-white background highlights to white.
+    // Only effective for light-coloured backgrounds (cream, grey, off-white).
+
+    private func toneCurveFallback(image: UIImage) -> UIImage {
+        guard let cgImage = image.cgImage else { return image }
+        var ci = CIImage(cgImage: cgImage)
+        if let f = CIFilter(name: "CIToneCurve") {
+            f.setValue(ci, forKey: kCIInputImageKey)
+            f.setValue(CIVector(x: 0.00, y: 0.00), forKey: "inputPoint0")
+            f.setValue(CIVector(x: 0.50, y: 0.50), forKey: "inputPoint1")
+            f.setValue(CIVector(x: 0.75, y: 0.82), forKey: "inputPoint2")
+            f.setValue(CIVector(x: 0.88, y: 0.97), forKey: "inputPoint3")
+            f.setValue(CIVector(x: 1.00, y: 1.00), forKey: "inputPoint4")
+            if let out = f.outputImage { ci = out }
         }
-        return rebuildImage(pixels: px, width: w, height: h) ?? image
+        guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return image }
+        return UIImage(cgImage: cg)
     }
+
+    // MARK: ── Gaussian Blur (for mask softening) ──────────────────────────────
 
     private func gaussianBlurMask(_ mask: [Float], w: Int, h: Int, radius: Int) -> [Float] {
         guard radius > 0 else { return mask }
-        let ksz = radius*2+1; let sigma = Float(radius)/2.5
-        var kernel = [Float](repeating: 0, count: ksz); var ksum: Float = 0
-        for i in 0..<ksz { let x=Float(i-radius); kernel[i]=exp(-x*x/(2*sigma*sigma)); ksum+=kernel[i] }
+        let ksz = radius * 2 + 1
+        var kernel = [Float](repeating: 0, count: ksz)
+        let sigma = Float(radius) / 2.0
+        var ksum: Float = 0
+        for i in 0..<ksz {
+            let x = Float(i - radius)
+            kernel[i] = exp(-x*x / (2*sigma*sigma))
+            ksum += kernel[i]
+        }
         for i in 0..<ksz { kernel[i] /= ksum }
         var temp = [Float](repeating: 0, count: w*h)
         for y in 0..<h { for x in 0..<w {
             var v: Float = 0
-            for k in 0..<ksz { let sx=min(max(x+k-radius,0),w-1); v+=mask[y*w+sx]*kernel[k] }
-            temp[y*w+x]=v
+            for k in 0..<ksz {
+                let sx = min(max(x+k-radius, 0), w-1)
+                v += mask[y*w+sx] * kernel[k]
+            }
+            temp[y*w+x] = v
         }}
         var result = [Float](repeating: 0, count: w*h)
         for y in 0..<h { for x in 0..<w {
             var v: Float = 0
-            for k in 0..<ksz { let sy=min(max(y+k-radius,0),h-1); v+=temp[sy*w+x]*kernel[k] }
-            result[y*w+x]=min(max(v,0),1)
+            for k in 0..<ksz {
+                let sy = min(max(y+k-radius, 0), h-1)
+                v += temp[sy*w+x] * kernel[k]
+            }
+            result[y*w+x] = min(max(v, 0), 1)
         }}
         return result
     }
