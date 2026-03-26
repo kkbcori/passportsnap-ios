@@ -244,6 +244,9 @@ class PassportProcessor: NSObject {
         let w = cgImage.width; let h = cgImage.height
 
         // ── 1. Run VNGeneratePersonSegmentationRequest ────────────────────────
+        // Pass CGImagePropertyOrientation so Vision interprets the image correctly.
+        // UIImage.imageOrientation → CGImagePropertyOrientation mapping needed
+        // because fixOrientation() already normalised the pixels — pass .up.
         var maskPixels: [Float]?
         var maskW = 0; var maskH = 0
         let sem = DispatchSemaphore(value: 0)
@@ -257,10 +260,9 @@ class PassportProcessor: NSObject {
             maskW = CVPixelBufferGetWidth(buf)
             maskH = CVPixelBufferGetHeight(buf)
             guard let base = CVPixelBufferGetBaseAddress(buf) else { return }
-            let ptr      = base.assumingMemoryBound(to: Float32.self)
-            let bpr      = CVPixelBufferGetBytesPerRow(buf)
-            let fpr      = bpr / MemoryLayout<Float32>.size
-            var flat     = [Float](repeating: 0, count: maskW * maskH)
+            let ptr = base.assumingMemoryBound(to: Float32.self)
+            let fpr = CVPixelBufferGetBytesPerRow(buf) / MemoryLayout<Float32>.size
+            var flat = [Float](repeating: 0, count: maskW * maskH)
             for row in 0..<maskH {
                 for col in 0..<maskW {
                     flat[row * maskW + col] = ptr[row * fpr + col]
@@ -269,27 +271,23 @@ class PassportProcessor: NSObject {
             maskPixels = flat
         }
         request.qualityLevel = .accurate
-        try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+
+        // fixOrientation() already rendered pixels upright — always pass .up
+        let handler = VNImageRequestHandler(cgImage: cgImage,
+                                            orientation: .up,
+                                            options: [:])
+        try? handler.perform([request])
         sem.wait()
 
         guard let rawMask = maskPixels, maskW > 0, maskH > 0 else {
-            return toneCurveFallback(image: image)  // ML failed — use fallback
+            return toneCurveFallback(image: image)
         }
 
-        // ── 2. Upsample mask to image size (bilinear) ────────────────────────
-        // ── 2. Flip mask vertically ───────────────────────────────────────────
-        // VNGeneratePersonSegmentationRequest uses Vision coordinates: origin
-        // at BOTTOM-LEFT, y increasing upward. CGImage uses TOP-LEFT origin.
-        // Without flipping, the mask is upside-down → mirrored/split output.
-        var flippedMask = [Float](repeating: 0, count: maskW * maskH)
-        for row in 0..<maskH {
-            let srcRow = maskH - 1 - row
-            for col in 0..<maskW {
-                flippedMask[row * maskW + col] = rawMask[srcRow * maskW + col]
-            }
-        }
+        // ── 2. The mask from VNGeneratePersonSegmentationRequest is already in
+        //        image-space coordinates when .up orientation is passed — NO flip needed.
+        //        (The previous vertical flip was compensating for a wrong orientation.)
 
-        // ── 3. Upsample mask to image size (bilinear) ────────────────────────
+        // ── 3. Upsample mask to image size (bilinear interpolation) ──────────
         var mask = [Float](repeating: 0, count: w * h)
         let scaleX = Double(maskW) / Double(w)
         let scaleY = Double(maskH) / Double(h)
@@ -301,34 +299,36 @@ class PassportProcessor: NSObject {
                 let mx = Double(px) * scaleX
                 let mx0 = max(0, Int(mx)); let mx1 = min(maskW-1, mx0+1)
                 let fx = Float(mx - Double(mx0))
-                let v  = flippedMask[my0*maskW+mx0] * (1-fx) * (1-fy)
-                       + flippedMask[my0*maskW+mx1] *    fx  * (1-fy)
-                       + flippedMask[my1*maskW+mx0] * (1-fx) *    fy
-                       + flippedMask[my1*maskW+mx1] *    fx  *    fy
-                mask[py*w+px] = v
+                mask[py*w+px] = rawMask[my0*maskW+mx0] * (1-fx) * (1-fy)
+                              + rawMask[my0*maskW+mx1] *    fx  * (1-fy)
+                              + rawMask[my1*maskW+mx0] * (1-fx) *    fy
+                              + rawMask[my1*maskW+mx1] *    fx  *    fy
             }
         }
 
-        // ── 3. Soft edge: small Gaussian blur on mask boundary ───────────────
-        // Blur radius = 0.5% of shorter side → smooth hair/skin edges
-        let blurR = max(3, min(w, h) / 200)
-        let softMask = gaussianBlurMask(mask, w: w, h: h, radius: blurR)
+        // ── 4. Threshold to binary + tiny blur only on boundary ──────────────
+        // Hard threshold at 0.5 first — prevents blur spreading low-confidence
+        // mask values (face near cream bg) inward → white patches on face.
+        // Then small Gaussian blur ONLY on the boundary zone (mask 0.3–0.7)
+        // to smooth hair/skin edges without affecting confident regions.
+        var threshMask = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w*h) { threshMask[i] = mask[i] >= 0.5 ? 1.0 : 0.0 }
+        let blurR = max(2, min(w, h) / 300)
+        let softMask = gaussianBlurMask(threshMask, w: w, h: h, radius: blurR)
 
-        // ── 4. Composite person onto white ───────────────────────────────────
-        // mask=1 → person (keep), mask=0 → background (white)
-        // Simple alpha blend: result = person * mask + white * (1 - mask)
+        // ── 5. Composite person onto white ───────────────────────────────────
         var pixels = extractPixels(cgImage)
         for i in 0..<(w * h) {
-            let alpha = softMask[i]          // 1.0 = fully person, 0.0 = fully background
-            guard alpha < 0.999 else { continue }  // fully person — skip
+            let alpha = softMask[i]   // 1.0 = person, 0.0 = background
+            guard alpha < 0.999 else { continue }
             let pi = i * 4
-            if alpha <= 0.001 {              // fully background — pure white
+            if alpha <= 0.001 {
                 pixels[pi]=255; pixels[pi+1]=255; pixels[pi+2]=255
-            } else {                         // soft edge — blend
+            } else {
                 let r = Float(pixels[pi]); let g = Float(pixels[pi+1]); let b = Float(pixels[pi+2])
-                pixels[pi]   = UInt8((r * alpha + 255 * (1-alpha)).clamped(to: 0...255))
-                pixels[pi+1] = UInt8((g * alpha + 255 * (1-alpha)).clamped(to: 0...255))
-                pixels[pi+2] = UInt8((b * alpha + 255 * (1-alpha)).clamped(to: 0...255))
+                pixels[pi]   = UInt8((r*alpha + 255*(1-alpha)).clamped(to: 0...255))
+                pixels[pi+1] = UInt8((g*alpha + 255*(1-alpha)).clamped(to: 0...255))
+                pixels[pi+2] = UInt8((b*alpha + 255*(1-alpha)).clamped(to: 0...255))
             }
         }
         return rebuildImage(pixels: pixels, width: w, height: h) ?? image
