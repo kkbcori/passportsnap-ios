@@ -277,6 +277,19 @@ class PassportProcessor: NSObject {
         }
 
         // ── 2. Upsample mask to image size (bilinear) ────────────────────────
+        // ── 2. Flip mask vertically ───────────────────────────────────────────
+        // VNGeneratePersonSegmentationRequest uses Vision coordinates: origin
+        // at BOTTOM-LEFT, y increasing upward. CGImage uses TOP-LEFT origin.
+        // Without flipping, the mask is upside-down → mirrored/split output.
+        var flippedMask = [Float](repeating: 0, count: maskW * maskH)
+        for row in 0..<maskH {
+            let srcRow = maskH - 1 - row
+            for col in 0..<maskW {
+                flippedMask[row * maskW + col] = rawMask[srcRow * maskW + col]
+            }
+        }
+
+        // ── 3. Upsample mask to image size (bilinear) ────────────────────────
         var mask = [Float](repeating: 0, count: w * h)
         let scaleX = Double(maskW) / Double(w)
         let scaleY = Double(maskH) / Double(h)
@@ -288,10 +301,10 @@ class PassportProcessor: NSObject {
                 let mx = Double(px) * scaleX
                 let mx0 = max(0, Int(mx)); let mx1 = min(maskW-1, mx0+1)
                 let fx = Float(mx - Double(mx0))
-                let v  = rawMask[my0*maskW+mx0] * (1-fx) * (1-fy)
-                       + rawMask[my0*maskW+mx1] *    fx  * (1-fy)
-                       + rawMask[my1*maskW+mx0] * (1-fx) *    fy
-                       + rawMask[my1*maskW+mx1] *    fx  *    fy
+                let v  = flippedMask[my0*maskW+mx0] * (1-fx) * (1-fy)
+                       + flippedMask[my0*maskW+mx1] *    fx  * (1-fy)
+                       + flippedMask[my1*maskW+mx0] * (1-fx) *    fy
+                       + flippedMask[my1*maskW+mx1] *    fx  *    fy
                 mask[py*w+px] = v
             }
         }
