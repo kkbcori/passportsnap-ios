@@ -158,11 +158,11 @@ export default function WelcomeScreen() {
         <View style={s.guaranteeOverlay}>
           <View style={s.guaranteeCard}>
             <Text style={s.guaranteeTitle}>↩ Refund Policy</Text>
-            <Text style={s.guaranteeBody}>
-              We stand behind every photo PassportSnap produces. For the best result, follow the on-screen guide — align the crown of your head with the green line, keep your eyes between the blue lines, and fill the inner oval with your face.{'
-
-'}
-              If you do this correctly and your photo is still rejected by the issuing authority due to a <Text style={s.guaranteeEmphasis}>technical compliance issue</Text> (incorrect dimensions, background colour, or head size), send us a screenshot or written notice of rejection and we'll refund your $1.50 in full — no questions asked.
+                        <Text style={s.guaranteeBody}>
+              We stand behind every photo PassportSnap produces. For the best result, follow the on-screen guide — align the crown of your head with the green line, keep your eyes between the blue lines, and fill the inner oval with your face.
+            </Text>
+            <Text style={[s.guaranteeBody, { marginTop: 10 }]}>
+              If you do this correctly and your photo is still rejected by the issuing authority due to a <Text style={s.guaranteeEmphasis}>technical compliance issue</Text> (wrong dimensions, background colour or head size), send us the rejection notice and we will refund your $1.50 in full — no questions asked.
             </Text>
             <Text style={s.guaranteeSmall}>
               * Covers technical compliance failures only. Rejections due to personal appearance (expression, glasses, head covering or attire) are outside our control and are not eligible.
