@@ -62,20 +62,20 @@ function getOverlaySize(country?: string) {
 }
 
 const NUDGE_PX = 8;
-const ZOOM_STEP = 0.02;
+const ZOOM_STEP = 0.01;
 
 // En 2/3/4: per-country auto-positioning adjustments.
 // zoomFactor: multiplied onto the base autoCrop scale (< 1 = zoom out).
 // tyOffset: screen-pixel offset added to initial ty (negative = move up).
 const COUNTRY_AUTO_ADJ: Record<string, { zoomFactor: number; tyOffset: number }> = {
-  USA: { zoomFactor: 0.96, tyOffset: -44 },  // zoom out 4%, up 5.5 clicks
-  IND: { zoomFactor: 0.96, tyOffset: -44 },
-  GBR: { zoomFactor: 0.92, tyOffset: -34 },  // zoom out 8%, up 4.25 clicks
-  SCH: { zoomFactor: 0.92, tyOffset: -34 },
-  DEU: { zoomFactor: 0.92, tyOffset: -34 },
-  ZAF: { zoomFactor: 0.92, tyOffset: -34 },
-  AUS: { zoomFactor: 0.92, tyOffset: -34 },
-  CAN: { zoomFactor: 1.00, tyOffset: -24 },  // no zoom, up 3 clicks
+  USA: { zoomFactor: 0.98, tyOffset: 4 },   // zoom out 2%, down 0.5 clicks
+  IND: { zoomFactor: 0.98, tyOffset: 4 },
+  GBR: { zoomFactor: 0.97, tyOffset: 4 },   // zoom out 3%, down 0.5 clicks
+  SCH: { zoomFactor: 0.97, tyOffset: 4 },
+  DEU: { zoomFactor: 0.97, tyOffset: 4 },
+  ZAF: { zoomFactor: 0.97, tyOffset: 4 },
+  AUS: { zoomFactor: 0.97, tyOffset: 4 },
+  CAN: { zoomFactor: 1.00, tyOffset: 0 },   // no zoom change
 };
 
 export default function AdjustScreen() {
