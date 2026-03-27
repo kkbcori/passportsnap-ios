@@ -64,6 +64,20 @@ function getOverlaySize(country?: string) {
 const NUDGE_PX = 8;
 const ZOOM_STEP = 0.02;
 
+// En 2/3/4: per-country auto-positioning adjustments.
+// zoomFactor: multiplied onto the base autoCrop scale (< 1 = zoom out).
+// tyOffset: screen-pixel offset added to initial ty (negative = move up).
+const COUNTRY_AUTO_ADJ: Record<string, { zoomFactor: number; tyOffset: number }> = {
+  USA: { zoomFactor: 0.96, tyOffset: -44 },  // zoom out 4%, up 5.5 clicks
+  IND: { zoomFactor: 0.96, tyOffset: -44 },
+  GBR: { zoomFactor: 0.92, tyOffset: -34 },  // zoom out 8%, up 4.25 clicks
+  SCH: { zoomFactor: 0.92, tyOffset: -34 },
+  DEU: { zoomFactor: 0.92, tyOffset: -34 },
+  ZAF: { zoomFactor: 0.92, tyOffset: -34 },
+  AUS: { zoomFactor: 0.92, tyOffset: -34 },
+  CAN: { zoomFactor: 1.00, tyOffset: -24 },  // no zoom, up 3 clicks
+};
+
 export default function AdjustScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<RouteProp<Record<string, RouteParams>, string>>();
@@ -72,14 +86,16 @@ export default function AdjustScreen() {
   const { w: OVW, h: OVH } = getOverlaySize(country);
 
   function computeAutoTransform() {
+    const adj = COUNTRY_AUTO_ADJ[country] ?? { zoomFactor: 1.0, tyOffset: 0 };
     if (autoCrop && autoCrop.w > 0 && autoCrop.h > 0) {
-      const s = OVW / autoCrop.w;
+      const sBase = OVW / autoCrop.w;
+      const s  = sBase * adj.zoomFactor;
       const tx = -(autoCrop.x + autoCrop.w / 2 - origW / 2) * s;
-      const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s;
+      const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s + adj.tyOffset;
       return { scale: s, tx, ty };
     }
-    const s = Math.max(OVW / origW, OVH / origH);
-    return { scale: s, tx: 0, ty: 0 };
+    const s = Math.max(OVW / origW, OVH / origH) * adj.zoomFactor;
+    return { scale: s, tx: 0, ty: adj.tyOffset };
   }
 
   const autoT = computeAutoTransform();
@@ -159,9 +175,7 @@ export default function AdjustScreen() {
       const cropX = Math.round((0 - (OVW / 2 + tx)) / scale + origW / 2);
       const cropY = Math.round((0 - (OVH / 2 + ty)) / scale + origH / 2);
       const cropW = Math.round(OVW / scale);
-      // Derive cropH from cropW using exact output aspect ratio — prevents
-      // independent Math.round() calls producing different ratios → stretch
-      const cropH = Math.round(cropW * outH / outW);
+      const cropH = Math.round(OVH / scale);
 
       const outW = country === 'CAN' ? 1200 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 900 : 600;
       const outH = country === 'CAN' ? 1680 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 1200 : 600;

@@ -2,7 +2,7 @@
  * WelcomeScreen v8 — Professional trust-forward redesign
  * No emojis. Clean typography. Government-grade feel.
  */
-import React, { useEffect, useRef } from 'react';
+import React, { useState }, { useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Image,
   SafeAreaView, ScrollView, StatusBar, Animated,
@@ -98,6 +98,7 @@ function DosDontsGuide() {
 }
 
 export default function WelcomeScreen() {
+  const [guaranteeVisible, setGuaranteeVisible] = React.useState(false);
   const navigation = useNavigation<any>();
 
   return (
@@ -147,7 +148,31 @@ export default function WelcomeScreen() {
           <Text style={s.ctaArrow}>→</Text>
         </TouchableOpacity>
         <Text style={s.footNote}>Free to try · Pay only when you download</Text>
+        <Text style={s.guarantee} onPress={() => setGuaranteeVisible(true)}>
+          ↩ Money-back guarantee*
+        </Text>
       </View>
+
+      {/* Money-back guarantee modal */}
+      {guaranteeVisible && (
+        <View style={s.guaranteeOverlay}>
+          <View style={s.guaranteeCard}>
+            <Text style={s.guaranteeTitle}>↩ Refund Policy</Text>
+            <Text style={s.guaranteeBody}>
+              We stand behind every photo PassportSnap produces. For the best result, follow the on-screen guide — align the crown of your head with the green line, keep your eyes between the blue lines, and fill the inner oval with your face.{'
+
+'}
+              If you do this correctly and your photo is still rejected by the issuing authority due to a <Text style={s.guaranteeEmphasis}>technical compliance issue</Text> (incorrect dimensions, background colour, or head size), send us a screenshot or written notice of rejection and we'll refund your $1.50 in full — no questions asked.
+            </Text>
+            <Text style={s.guaranteeSmall}>
+              * Covers technical compliance failures only. Rejections due to personal appearance (expression, glasses, head covering or attire) are outside our control and are not eligible.
+            </Text>
+            <TouchableOpacity style={s.guaranteeClose} onPress={() => setGuaranteeVisible(false)}>
+              <Text style={s.guaranteeCloseT}>Got it</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -201,6 +226,20 @@ const s = StyleSheet.create({
   ctaT:        { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
   ctaArrow:    { color: 'rgba(255,255,255,0.6)', fontSize: 18, fontWeight: '300' },
   footNote:    { textAlign: 'center', fontSize: 11, color: C.text3, marginTop: 8 },
+  guarantee:   { textAlign: 'center', fontSize: 11, color: '#2B59C3', marginTop: 4,
+                 textDecorationLine: 'underline' },
+  guaranteeOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+                      backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center',
+                      alignItems: 'center', zIndex: 999, padding: 20 },
+  guaranteeCard: { backgroundColor: '#151929', borderRadius: 16, padding: 24,
+                   borderWidth: 1, borderColor: '#1E2438', maxWidth: 400 },
+  guaranteeTitle: { fontSize: 16, fontWeight: '700', color: '#F0F2FF', marginBottom: 12 },
+  guaranteeBody: { fontSize: 13, color: '#A8B1CC', lineHeight: 20, marginBottom: 12 },
+  guaranteeEmphasis: { color: '#F0F2FF', fontWeight: '600' },
+  guaranteeSmall: { fontSize: 11, color: '#6B7294', lineHeight: 16, marginBottom: 20 },
+  guaranteeClose: { backgroundColor: '#2B59C3', borderRadius: 10, padding: 12,
+                    alignItems: 'center' },
+  guaranteeCloseT: { color: '#fff', fontWeight: '700', fontSize: 14 },
 
   // Do's & Don'ts
   dosSection:  { paddingHorizontal: 24, marginTop: 24 },
