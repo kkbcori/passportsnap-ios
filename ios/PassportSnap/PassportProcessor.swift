@@ -52,10 +52,13 @@ class PassportProcessor: NSObject {
     // US/IND: 600/51.0=11.765 px/mm  → gap=8.2mm→96px,  face=32.5mm→382px, bottom=478
     // UK/etc: 1200/45.0=26.667 px/mm → gap=5.0mm→133px, face=32.1mm→856px, bottom=989
     // CAN:    1680/70.0=24.000 px/mm → gap=10.0mm→240px, face=34.3mm→823px, bottom=1063
-    private static let US_SPEC  = Spec(outW:600,  outH:600,  photoHeightMm:51.0, faceMm:32.5, gapMm:8.2,  ovalOuterTop:96,  ovalOuterBottom:478,  hairMult:1.12)
-    private static let UK_SPEC  = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:32.1, gapMm:5.0,  ovalOuterTop:133, ovalOuterBottom:989,  hairMult:1.22)
-    private static let AUS_SPEC = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:32.1, gapMm:5.0,  ovalOuterTop:133, ovalOuterBottom:989,  hairMult:1.22)
-    private static let CAN_SPEC = Spec(outW:1200, outH:1680, photoHeightMm:70.0, faceMm:34.3, gapMm:10.0, ovalOuterTop:240, ovalOuterBottom:1063, hairMult:1.075)
+    // En2: US/IND  zoom out 4% (2 clicks), up 5.5 clicks → faceMm 32.5→31.2, ovalTop 96→22
+    // En3: UK/AUS  zoom out 8% (4 clicks), up 4.25 clicks → faceMm 32.1→29.5, ovalTop 133→47
+    // En4: CAN     no zoom change, up 3 clicks → ovalTop 240→160
+    private static let US_SPEC  = Spec(outW:600,  outH:600,  photoHeightMm:51.0, faceMm:31.2, gapMm:1.9,  ovalOuterTop:22,  ovalOuterBottom:389,  hairMult:1.12)
+    private static let UK_SPEC  = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
+    private static let AUS_SPEC = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
+    private static let CAN_SPEC = Spec(outW:1200, outH:1680, photoHeightMm:70.0, faceMm:34.3, gapMm:6.7,  ovalOuterTop:160, ovalOuterBottom:983,  hairMult:1.075)
 
     private func getSpec(_ country: String) -> Spec {
         switch country {
@@ -443,26 +446,52 @@ class PassportProcessor: NSObject {
             return Y > 30 && Y < 242 && Cb > 60 && Cb < 140 && Cr > 128 && Cr < 190
         }
 
-        // Step 1: headTop — first SOLID non-white row in centre 60%
-        // Threshold 230 (not 245): cream/beige residuals after bg removal are
-        // typically R=235-244 — they pass 245 but fail 230. Real hair is R<200.
-        // Require ≥25 pixels per row (not 10): bg residuals are sparse (1-5px),
-        // hair is a solid band (50+ px). This prevents false early detection.
-        // Skip top 6%: background borders are never completely clean after removal.
-        let htL = w * 20 / 100; let htR = w * 80 / 100
-        let scanStartY = h * 6 / 100
+        // Step 1: headTop — find the very topmost pixel of the head.
+        // Handles: dark hair, bald/light scalp, headscarves, turbans, hijabs, caps.
+        //
+        // KEY INSIGHT: After ML segmentation + CIBlendWithMask the person boundary
+        // has a soft alpha blend. Pixels 1-4 rows ABOVE the actual head top are
+        // blended with white, producing near-white grey (dist-from-white ≈ 15-30).
+        // We must NOT trigger on these — they are NOT the head.
+        //
+        // We use distance-from-white as the metric (not luma):
+        //   dist = sqrt((255-R)² + (255-G)² + (255-B)²)
+        //   dist > 40, ≥3 px per row → "strong" head pixel (dark hair, coloured scarf, skin)
+        //   dist > 20, ≥5 px per row → "weak" head pixel (light bald scalp, off-white scarf)
+        //   dist ≤ 20 → soft ML edge or background — IGNORE
+        //
+        // After finding the first qualifying row, walk back UP to catch sparse
+        // wisps (fine hair, flyaways) that are 1-2 rows above the solid band.
+        let htL = w * 10 / 100; let htR = w * 90 / 100
         var headTop = -1
-        for y in stride(from: scanStartY, to: h, by: STEP) {
-            var count = 0
+
+        for y in stride(from: 0, to: h, by: STEP) {
+            var strong = 0; var weak = 0
             for x in stride(from: htL, to: htR, by: STEP) {
                 let i = (y*w+x)*4
-                // Stricter: pixel must be noticeably non-white (luma < 230)
-                let lum = Int(pixels[i])*299 + Int(pixels[i+1])*587 + Int(pixels[i+2])*114
-                if lum < 230000 { count += 1; if count >= 25 { headTop = y; break } }
+                let dr = Int(255) - Int(pixels[i])
+                let dg = Int(255) - Int(pixels[i+1])
+                let db = Int(255) - Int(pixels[i+2])
+                let dist2 = dr*dr + dg*dg + db*db   // squared — avoid sqrt in inner loop
+                if dist2 > 1600 { strong += 1 }      // dist > 40  (40² = 1600)
+                else if dist2 > 400 { weak += 1 }    // dist > 20  (20² = 400)
             }
-            if headTop != -1 { break }
+            if strong >= 3 || weak >= 5 { headTop = y; break }
         }
         guard headTop != -1 else { return nil }
+
+        // Walk back up from headTop to catch sparse wisps above the solid band
+        for y in stride(from: headTop - STEP, through: 0, by: -STEP) {
+            var weak = 0
+            for x in stride(from: htL, to: htR, by: STEP) {
+                let i = (y*w+x)*4
+                let dr = Int(255)-Int(pixels[i]); let dg = Int(255)-Int(pixels[i+1])
+                let db = Int(255)-Int(pixels[i+2])
+                if dr*dr + dg*dg + db*db > 400 { weak += 1 }
+            }
+            if weak >= 2 { headTop = y } // sparse wisp — extend up
+            else { break }               // gap → stop
+        }
 
         // Step 2: face centre X via skin centroid in top 45%
         let scanBot = min(h * 45 / 100, h)
@@ -526,6 +555,20 @@ class PassportProcessor: NSObject {
         text.draw(at: CGPoint(x: -ts.width/2, y: -ts.height/2), withAttributes: attrs)
         ctx.restoreGState()
         return UIGraphicsGetImageFromCurrentImageContext() ?? image
+    }
+
+    /// En1: subtle 1–2% saturation/vibrance boost to make face colours more vivid.
+    /// Uses CIVibrance — boosts less-saturated colours more than already-vivid ones,
+    /// so skin tones pop without over-saturating the background or clothing.
+    private func applyVibrance(_ image: UIImage, amount: Float) -> UIImage {
+        guard let cgImage = image.cgImage else { return image }
+        let ci = CIImage(cgImage: cgImage)
+        guard let f = CIFilter(name: "CIVibrance") else { return image }
+        f.setValue(ci,     forKey: kCIInputImageKey)
+        f.setValue(amount, forKey: "inputAmount")   // 0.015 = 1.5% boost
+        guard let out = f.outputImage,
+              let cg  = ciContext.createCGImage(out, from: out.extent) else { return image }
+        return UIImage(cgImage: cg)
     }
 
     private func applyBrightness(_ image: UIImage, amount: Int) -> UIImage {
@@ -733,6 +776,7 @@ class PassportProcessor: NSObject {
                 }
                 cropped = resized
                 if brightness != 0 { cropped = self.applyBrightness(cropped, amount: brightness) }
+                cropped = self.applyVibrance(cropped, amount: 0.015) // En1: 1.5% vivid boost
 
                 guard let cleanData = cropped.jpegData(compressionQuality: 0.92) else {
                     throw NSError(domain:"PP", code:23, userInfo:[NSLocalizedDescriptionKey:"Clean encode failed"])

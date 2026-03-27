@@ -67,15 +67,18 @@ const ZOOM_STEP = 0.01;
 // En 2/3/4: per-country auto-positioning adjustments.
 // zoomFactor: multiplied onto the base autoCrop scale (< 1 = zoom out).
 // tyOffset: screen-pixel offset added to initial ty (negative = move up).
+// Per-country zoom adjustments applied to Swift's auto-crop scale.
+// tyOffset is 0 for all — Swift's prepare() already places crown at ovalOuterTop
+// (the green line) via scanHeadBounds. Manual ty offset would fight that.
 const COUNTRY_AUTO_ADJ: Record<string, { zoomFactor: number; tyOffset: number }> = {
-  USA: { zoomFactor: 0.98, tyOffset: 4 },   // zoom out 2%, down 0.5 clicks
-  IND: { zoomFactor: 0.98, tyOffset: 4 },
-  GBR: { zoomFactor: 0.97, tyOffset: 4 },   // zoom out 3%, down 0.5 clicks
-  SCH: { zoomFactor: 0.97, tyOffset: 4 },
-  DEU: { zoomFactor: 0.97, tyOffset: 4 },
-  ZAF: { zoomFactor: 0.97, tyOffset: 4 },
-  AUS: { zoomFactor: 0.97, tyOffset: 4 },
-  CAN: { zoomFactor: 1.00, tyOffset: 0 },   // no zoom change
+  USA: { zoomFactor: 0.98, tyOffset: 0 },   // zoom out 2%
+  IND: { zoomFactor: 0.98, tyOffset: 0 },
+  GBR: { zoomFactor: 0.97, tyOffset: 0 },   // zoom out 3%
+  SCH: { zoomFactor: 0.97, tyOffset: 0 },
+  DEU: { zoomFactor: 0.97, tyOffset: 0 },
+  ZAF: { zoomFactor: 0.97, tyOffset: 0 },
+  AUS: { zoomFactor: 0.97, tyOffset: 0 },
+  CAN: { zoomFactor: 1.00, tyOffset: 0 },
 };
 
 export default function AdjustScreen() {
