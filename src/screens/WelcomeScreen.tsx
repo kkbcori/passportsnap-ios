@@ -2,7 +2,7 @@
  * WelcomeScreen v8 — Professional trust-forward redesign
  * No emojis. Clean typography. Government-grade feel.
  */
-import React, { useState }, { useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Image,
   SafeAreaView, ScrollView, StatusBar, Animated,
@@ -98,7 +98,7 @@ function DosDontsGuide() {
 }
 
 export default function WelcomeScreen() {
-  const [guaranteeVisible, setGuaranteeVisible] = React.useState(false);
+  const [guaranteeVisible, setGuaranteeVisible] = useState(false);
   const navigation = useNavigation<any>();
 
   return (
