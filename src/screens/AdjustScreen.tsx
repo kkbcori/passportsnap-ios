@@ -88,11 +88,14 @@ export default function AdjustScreen() {
   const country = countryRaw ?? 'USA';
   const { w: OVW, h: OVH } = getOverlaySize(country);
 
+  // MIN_SCALE/MAX_SCALE must be declared BEFORE computeAutoTransform() is called
+  // (const is not hoisted — accessing it before declaration returns undefined → NaN scale)
+  const MIN_SCALE = 0.05; const MAX_SCALE = 4.0;
+
   function computeAutoTransform() {
     const adj = COUNTRY_AUTO_ADJ[country] ?? { zoomSteps: 0, tyOffset: 0 };
     if (autoCrop && autoCrop.w > 0 && autoCrop.h > 0) {
       const sBase = OVW / autoCrop.w;
-      // Subtract whole ZOOM_STEPs so the zoom % display clearly reflects the change
       const s  = Math.max(MIN_SCALE, sBase - adj.zoomSteps * ZOOM_STEP);
       const tx = -(autoCrop.x + autoCrop.w / 2 - origW / 2) * s;
       const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s + adj.tyOffset;
@@ -104,7 +107,6 @@ export default function AdjustScreen() {
   }
 
   const autoT = computeAutoTransform();
-  const MIN_SCALE = 0.05; const MAX_SCALE = 4.0;
   const BRIGHTNESS_STEP = 5;
   const MIN_BRIGHTNESS = -50; const MAX_BRIGHTNESS = 50;
 
