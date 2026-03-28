@@ -65,20 +65,20 @@ const NUDGE_PX = 8;
 const ZOOM_STEP = 0.01;
 
 // En 2/3/4: per-country auto-positioning adjustments.
-// zoomFactor: multiplied onto the base autoCrop scale (< 1 = zoom out).
+// zoomSteps: number of ZOOM_STEP clicks subtracted from auto scale (1 = 1% zoom out).
 // tyOffset: screen-pixel offset added to initial ty (negative = move up).
 // Per-country zoom adjustments applied to Swift's auto-crop scale.
 // tyOffset is 0 for all — Swift's prepare() already places crown at ovalOuterTop
 // (the green line) via scanHeadBounds. Manual ty offset would fight that.
-const COUNTRY_AUTO_ADJ: Record<string, { zoomFactor: number; tyOffset: number }> = {
-  USA: { zoomFactor: 0.99, tyOffset: 8 },   // zoom out 1%, position unchanged
-  IND: { zoomFactor: 0.99, tyOffset: 8 },
-  GBR: { zoomFactor: 0.99, tyOffset: 24 },  // zoom out 1%, position unchanged
-  SCH: { zoomFactor: 0.99, tyOffset: 24 },
-  DEU: { zoomFactor: 0.99, tyOffset: 24 },
-  ZAF: { zoomFactor: 0.99, tyOffset: 24 },
-  AUS: { zoomFactor: 0.99, tyOffset: 24 },
-  CAN: { zoomFactor: 1.00, tyOffset: 0 },   // no change
+const COUNTRY_AUTO_ADJ: Record<string, { zoomSteps: number; tyOffset: number }> = {
+  USA: { zoomSteps: 1, tyOffset: 8 },   // 1 ZOOM_STEP out, position unchanged
+  IND: { zoomSteps: 1, tyOffset: 8 },
+  GBR: { zoomSteps: 1, tyOffset: 24 },  // 1 ZOOM_STEP out, position unchanged
+  SCH: { zoomSteps: 1, tyOffset: 24 },
+  DEU: { zoomSteps: 1, tyOffset: 24 },
+  ZAF: { zoomSteps: 1, tyOffset: 24 },
+  AUS: { zoomSteps: 1, tyOffset: 24 },
+  CAN: { zoomSteps: 0, tyOffset: 0 },   // no change
 };
 
 export default function AdjustScreen() {
@@ -89,15 +89,17 @@ export default function AdjustScreen() {
   const { w: OVW, h: OVH } = getOverlaySize(country);
 
   function computeAutoTransform() {
-    const adj = COUNTRY_AUTO_ADJ[country] ?? { zoomFactor: 1.0, tyOffset: 0 };
+    const adj = COUNTRY_AUTO_ADJ[country] ?? { zoomSteps: 0, tyOffset: 0 };
     if (autoCrop && autoCrop.w > 0 && autoCrop.h > 0) {
       const sBase = OVW / autoCrop.w;
-      const s  = sBase * adj.zoomFactor;
+      // Subtract whole ZOOM_STEPs so the zoom % display clearly reflects the change
+      const s  = Math.max(MIN_SCALE, sBase - adj.zoomSteps * ZOOM_STEP);
       const tx = -(autoCrop.x + autoCrop.w / 2 - origW / 2) * s;
       const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s + adj.tyOffset;
       return { scale: s, tx, ty };
     }
-    const s = Math.max(OVW / origW, OVH / origH) * adj.zoomFactor;
+    const sBase = Math.max(OVW / origW, OVH / origH);
+    const s = Math.max(MIN_SCALE, sBase - adj.zoomSteps * ZOOM_STEP);
     return { scale: s, tx: 0, ty: adj.tyOffset };
   }
 
