@@ -17,13 +17,18 @@ import Purchases           from 'react-native-purchases';
 const Stack = createNativeStackNavigator();
 
 /**
- * RevenueCat API keys — platform-specific.
- * Replace the iOS placeholder with your actual key from:
- *   app.revenuecat.com → Project → Apps → App Store → Public API Key
+ * RevenueCat API keys — one per platform.
+ *
+ * ANDROID: already live on Google Play.
+ * iOS:     create the iOS app in your RevenueCat dashboard, copy the
+ *          "App Store" API key (starts with "appl_"), and replace the
+ *          placeholder below before submitting to the App Store.
+ *
+ *  RevenueCat dashboard → Select project → Apps → + New app → App Store
  */
 const RC_API_KEY = Platform.select({
   android: 'goog_iwVsxrYeBZwPLSQVsvSQgyLjrma',
-  ios:     'appl_REPLACE_WITH_YOUR_IOS_KEY',
+  ios:     'appl_REPLACE_WITH_YOUR_IOS_KEY',   // ← replace before release
   default: 'goog_iwVsxrYeBZwPLSQVsvSQgyLjrma',
 })!;
 

@@ -73,11 +73,11 @@ const ZOOM_STEP = 0.01;
 const COUNTRY_AUTO_ADJ: Record<string, { zoomFactor: number; tyOffset: number }> = {
   USA: { zoomFactor: 0.99, tyOffset: 8 },   // zoom out 1%, position unchanged
   IND: { zoomFactor: 0.99, tyOffset: 8 },
-  GBR: { zoomFactor: 0.98, tyOffset: 24 },  // zoom out 2%, position unchanged
-  SCH: { zoomFactor: 0.98, tyOffset: 24 },
-  DEU: { zoomFactor: 0.98, tyOffset: 24 },
-  ZAF: { zoomFactor: 0.98, tyOffset: 24 },
-  AUS: { zoomFactor: 0.98, tyOffset: 24 },
+  GBR: { zoomFactor: 0.99, tyOffset: 24 },  // zoom out 1%, position unchanged
+  SCH: { zoomFactor: 0.99, tyOffset: 24 },
+  DEU: { zoomFactor: 0.99, tyOffset: 24 },
+  ZAF: { zoomFactor: 0.99, tyOffset: 24 },
+  AUS: { zoomFactor: 0.99, tyOffset: 24 },
   CAN: { zoomFactor: 1.00, tyOffset: 0 },   // no change
 };
 

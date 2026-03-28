@@ -129,15 +129,24 @@ export default function PreviewScreen() {
   const askForReview = () => {
     setTimeout(() => {
       Alert.alert(
-        'Enjoying PassportSnap?',
-        'Your photo has been saved! If PassportSnap helped you, a quick review would mean a lot to us.',
+        '⭐ Enjoying PassportSnap?',
+        'Your photo is saved! A quick rating helps us reach more people who need a passport photo.',
         [
-          { text: 'Not now', style: 'cancel' },
+          { text: 'Maybe later', style: 'cancel' },
           {
             text: 'Rate us ★★★★★',
             onPress: () => {
-              const storeUrl = 'https://play.google.com/store/apps/details?id=com.passportsnap';
-              Linking.openURL(storeUrl).catch(() => {});
+              // iOS App Store — replace APP_STORE_ID with your actual numeric ID
+              const storeUrl = Platform.OS === 'ios'
+                ? 'itms-apps://itunes.apple.com/app/idAPP_STORE_ID?action=write-review'
+                : 'https://play.google.com/store/apps/details?id=com.passportsnap&showAllReviews=true';
+              Linking.openURL(storeUrl).catch(() => {
+                // Fallback to web URL if itms-apps: fails
+                const webUrl = Platform.OS === 'ios'
+                  ? 'https://apps.apple.com/app/idAPP_STORE_ID?action=write-review'
+                  : 'https://play.google.com/store/apps/details?id=com.passportsnap';
+                Linking.openURL(webUrl).catch(() => {});
+              });
             },
           },
         ],
