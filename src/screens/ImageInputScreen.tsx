@@ -98,11 +98,7 @@ export default function ImageInputScreen() {
       <FloatingOrbs />
       <StatusBar barStyle="light-content" backgroundColor="#0C0F1A" />
 
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={{top:12,bottom:12,left:12,right:12}}>
-          <Text style={s.back}>←  Back</Text>
-        </TouchableOpacity>
-      </View>
+      <View style={s.header} />
 
       <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
 
