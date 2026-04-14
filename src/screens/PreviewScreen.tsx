@@ -129,24 +129,15 @@ export default function PreviewScreen() {
   const askForReview = () => {
     setTimeout(() => {
       Alert.alert(
-        '⭐ Enjoying PassportSnap?',
-        'Your photo is saved! A quick rating helps us reach more people who need a passport photo.',
+        'Enjoying PassportSnap?',
+        'Your photo has been saved! If PassportSnap helped you, a quick review would mean a lot to us.',
         [
-          { text: 'Maybe later', style: 'cancel' },
+          { text: 'Not now', style: 'cancel' },
           {
             text: 'Rate us ★★★★★',
             onPress: () => {
-              // iOS App Store — replace APP_STORE_ID with your actual numeric ID
-              const storeUrl = Platform.OS === 'ios'
-                ? 'itms-apps://itunes.apple.com/app/idAPP_STORE_ID?action=write-review'
-                : 'https://play.google.com/store/apps/details?id=com.passportsnap&showAllReviews=true';
-              Linking.openURL(storeUrl).catch(() => {
-                // Fallback to web URL if itms-apps: fails
-                const webUrl = Platform.OS === 'ios'
-                  ? 'https://apps.apple.com/app/idAPP_STORE_ID?action=write-review'
-                  : 'https://play.google.com/store/apps/details?id=com.passportsnap';
-                Linking.openURL(webUrl).catch(() => {});
-              });
+              const storeUrl = 'https://play.google.com/store/apps/details?id=com.passportsnap';
+              Linking.openURL(storeUrl).catch(() => {});
             },
           },
         ],
@@ -306,16 +297,6 @@ export default function PreviewScreen() {
           <Text style={styles.againText}>Start over</Text>
         </TouchableOpacity>
 
-        {/* ── TEST MODE: Free download (no paywall) ── */}
-        <View style={styles.testSection}>
-          <Text style={styles.testTitle}>🧪 TEST MODE</Text>
-          <TouchableOpacity style={styles.testBtn} onPress={() => doSave2x2(cleanBase64 ?? base64 ?? '')} disabled={saving2x2} activeOpacity={0.8}>
-            {saving2x2 ? <ActivityIndicator color="#F59E0B" /> : <Text style={styles.testBtnText}>⬇ Save Single Photo (Free)</Text>}
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.testBtn} onPress={() => save4x6()} disabled={saving4x6} activeOpacity={0.8}>
-            {saving4x6 ? <ActivityIndicator color="#F59E0B" /> : <Text style={styles.testBtnText}>⬇ Save 4×6 Sheet (Free)</Text>}
-          </TouchableOpacity>
-        </View>
 
       </ScrollView>
 
@@ -372,10 +353,7 @@ const styles = StyleSheet.create({
   btn4x6Sub:   { color: C.text3, fontSize: 11 },
   againBtn:    { paddingVertical: 14, paddingHorizontal: 36, marginTop: 8, backgroundColor: C.surface, borderRadius: 14, alignItems: 'center', borderWidth: 1, borderColor: C.border },
   againText:   { color: C.text2, fontSize: 15, fontWeight: '600' },
-  testSection: { alignSelf: 'stretch', marginTop: 20, padding: 16, borderRadius: 14, borderWidth: 1.5, borderColor: C.gold, borderStyle: 'dashed', backgroundColor: 'rgba(245,166,35,0.05)' },
-  testTitle:   { fontSize: 11, fontWeight: '700', color: C.gold, letterSpacing: 1, marginBottom: 10, textAlign: 'center' },
-  testBtn:     { backgroundColor: 'rgba(245,166,35,0.10)', borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16, marginBottom: 8, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(245,166,35,0.30)' },
-  testBtnText: { color: C.gold, fontSize: 14, fontWeight: '600' },
+
 
   // What You Get
   wygSection:  { alignSelf: 'stretch', marginTop: 20, marginBottom: 4 },

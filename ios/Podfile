@@ -4,14 +4,14 @@
 # After any change to this file:
 #   cd ios && pod install --repo-update
 #   Then open PassportSnap.xcworkspace (NOT .xcodeproj)
-
 require Pod::Executable.execute_command('node', ['-p',
   'require.resolve(
     "react-native/scripts/react_native_pods.rb",
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
-# min_ios_version_supported is set by React Native (currently iOS 13.4)
+# iOS 13.4 minimum (set by React Native).
+# Xcode 26 requires all pods to target >= 12.0 — enforced in post_install below.
 platform :ios, '13.4'
 prepare_react_native_project!
 
@@ -20,8 +20,8 @@ target 'PassportSnap' do
 
   use_react_native!(
     :path => config[:reactNativePath],
-    # Flipper is disabled — it is not needed for production and causes
-    # build failures on Apple Silicon Macs with recent Xcode versions.
+    # Flipper disabled — not needed for production, causes build failures
+    # on Apple Silicon Macs with recent Xcode versions.
     :flipper_configuration => FlipperConfiguration.disabled,
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
@@ -37,14 +37,25 @@ target 'PassportSnap' do
       :mac_catalyst_enabled => false
     )
 
-    # Fix: Some pods set IPHONEOS_DEPLOYMENT_TARGET below the project minimum.
-    # This silences the resulting warnings (and occasional build errors).
+    # Xcode 26 requires a minimum deployment target of iOS 12.0.
+    # Some pods still declare targets below this, causing build errors.
+    # Raise any pod below 13.4 to match the project minimum.
     installer.pods_project.targets.each do |target|
       target.build_configurations.each do |config|
         current = config.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
         if current && current.to_f < 13.4
           config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.4'
         end
+      end
+    end
+
+    # Xcode 26: suppress "missing module" warnings from generated interface files.
+    # These are benign but clutter the build log on the new SDK.
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        config.build_settings['SWIFT_SUPPRESS_WARNINGS'] = 'YES'
+        # Ensure arm64 is included for all pods (Apple Silicon + iOS device)
+        config.build_settings.delete('EXCLUDED_ARCHS[sdk=iphonesimulator*]')
       end
     end
   end

@@ -3,7 +3,6 @@
  * Flow: Welcome → CountrySelect → ImageInput → Processing → Adjust → Preview
  */
 import React, { useEffect } from 'react';
-import { Platform } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import WelcomeScreen       from './src/screens/WelcomeScreen';
@@ -16,32 +15,17 @@ import Purchases           from 'react-native-purchases';
 
 const Stack = createNativeStackNavigator();
 
-/**
- * RevenueCat API keys — one per platform.
- *
- * ANDROID: already live on Google Play.
- * iOS:     create the iOS app in your RevenueCat dashboard, copy the
- *          "App Store" API key (starts with "appl_"), and replace the
- *          placeholder below before submitting to the App Store.
- *
- *  RevenueCat dashboard → Select project → Apps → + New app → App Store
- */
-const RC_API_KEY = Platform.select({
-  android: 'goog_iwVsxrYeBZwPLSQVsvSQgyLjrma',
-  ios:     'appl_REPLACE_WITH_YOUR_IOS_KEY',   // ← replace before release
-  default: 'goog_iwVsxrYeBZwPLSQVsvSQgyLjrma',
-})!;
-
 export default function App() {
   useEffect(() => {
-    try {
-      Purchases.setLogLevel(Purchases.LOG_LEVEL.DEBUG);
-      Purchases.configure({ apiKey: RC_API_KEY });
-    } catch (e) {
-      console.warn('RevenueCat init failed:', e);
-    }
+	try {
+    Purchases.configure({
+      apiKey: 'goog_SOrjKfCqKpWRTpijBLZZCFIITPn',
+    });
+  } catch (e) {
+    console.warn('RevenueCat init failed:', e);
+  }
   }, []);
-
+    
   return (
     <NavigationContainer>
       <Stack.Navigator
