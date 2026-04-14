@@ -1,7 +1,7 @@
 /**
  * PaywallScreen — purchase options before download
  * Uses RevenueCat (react-native-purchases) for IAP
- * Products: passport_single ($1.50), passport_4x6 ($1.50), passport_bundle ($2.49)
+ * Products: passport_single ($1.59), passport_4x6 ($1.59), passport_bundle ($2.49)
  */
 import React, { useState } from 'react';
 import {
@@ -12,8 +12,8 @@ import {
 import Purchases from 'react-native-purchases';
 
 // Product IDs (must match Google Play Console + RevenueCat exactly):
-const PRODUCT_SINGLE = 'passport_single';   // $1.50 — single photo
-const PRODUCT_4X6    = 'passport_4x6';      // $1.50 — 4x6 print sheet
+const PRODUCT_SINGLE = 'passport_single';   // $1.59 — single photo
+const PRODUCT_4X6    = 'passport_4x6';      // $1.59 — 4x6 print sheet
 const PRODUCT_BUNDLE = 'passport_bundle';   // $2.49 — both files
 
 interface Props {
@@ -127,7 +127,7 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
               </TouchableOpacity>
             </View>
 
-            {/* Single photo — $1.50 */}
+            {/* Single photo — $1.59 */}
             <View style={styles.productCard}>
               <View style={styles.productTop}>
                 <View style={styles.productIcon}>
@@ -153,12 +153,12 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
               >
                 {loading === 'single'
                   ? <ActivityIndicator color="#A8B1CC" />
-                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.50</Text></Text>
+                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.59</Text></Text>
                 }
               </TouchableOpacity>
             </View>
 
-            {/* 4×6 print sheet — $1.50 */}
+            {/* 4×6 print sheet — $1.59 */}
             <View style={styles.productCard}>
               <View style={styles.productTop}>
                 <View style={styles.productIcon}>
@@ -184,7 +184,7 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
               >
                 {loading === '4x6'
                   ? <ActivityIndicator color="#A8B1CC" />
-                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.50</Text></Text>
+                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.59</Text></Text>
                 }
               </TouchableOpacity>
             </View>
@@ -196,22 +196,6 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
             <Text style={styles.trustText}>🔐  Secure payment via Google Play</Text>
             <Text style={styles.trustText}>↩  No subscription · One-time purchase</Text>
             <Text style={styles.trustText}>📸  Photo processed locally · Never stored</Text>
-          </View>
-
-          {/* Money-back guarantee */}
-          <View style={styles.guaranteeBox}>
-            <Text style={styles.guaranteeTitle}>↩ Money-back guarantee*</Text>
-            <Text style={styles.guaranteeText}>
-              Follow the on-screen guide (crown on green line, eyes between blue lines,
-              face filling the oval). If your photo is rejected for a{' '}
-              <Text style={styles.guaranteeEmphasis}>technical reason</Text> — wrong
-              dimensions, background colour, or head size — send us the rejection notice
-              and we'll refund your $1.50 in full.
-            </Text>
-            <Text style={styles.guaranteeSmall}>
-              * Covers technical compliance only. Rejections for personal appearance
-              (expression, glasses, head covering or attire) are not eligible.
-            </Text>
           </View>
 
         </ScrollView>
@@ -285,13 +269,5 @@ const styles = StyleSheet.create({
   buyBtnBundlePrice:  { fontSize: 16, fontWeight: '800' },
 
   trust:              { padding: 24, gap: 6, marginTop: 8 },
-  guaranteeBox:       { marginHorizontal: 20, marginBottom: 24, padding: 16,
-                        backgroundColor: 'rgba(43,89,195,0.08)', borderRadius: 12,
-                        borderWidth: 1, borderColor: 'rgba(43,89,195,0.25)' },
-  guaranteeTitle:     { fontSize: 13, fontWeight: '700', color: '#2B59C3',
-                        marginBottom: 8 },
-  guaranteeText:      { fontSize: 12, color: C.text2, lineHeight: 18, marginBottom: 8 },
-  guaranteeEmphasis:  { color: C.text1, fontWeight: '600' },
-  guaranteeSmall:     { fontSize: 11, color: C.text3, lineHeight: 16 },
   trustText:          { fontSize: 11, color: C.text3, textAlign: 'center', lineHeight: 18 },
 });
