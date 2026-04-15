@@ -49,8 +49,8 @@ function getOverlaySize(country?: string) {
   const maxW = SW - 32;
   const maxH = SH - 320;
   const ASPECTS: Record<string, number> = {
-    'GBR': 1200 / 900, 'AUS': 1200 / 900, 'CAN': 1680 / 1200,
-    'SCH': 1200 / 900, 'DEU': 1200 / 900, 'ZAF': 1200 / 900,
+    'GBR': 1200 / 933, 'AUS': 1200 / 933, 'CAN': 1680 / 1200,
+    'SCH': 1200 / 933, 'DEU': 1200 / 933, 'ZAF': 1200 / 933,
   };
   const aspect = ASPECTS[country ?? ''];
   if (aspect) {
@@ -62,24 +62,7 @@ function getOverlaySize(country?: string) {
 }
 
 const NUDGE_PX = 8;
-const ZOOM_STEP = 0.01;
-
-// En 2/3/4: per-country auto-positioning adjustments.
-// zoomSteps: number of ZOOM_STEP clicks subtracted from auto scale (1 = 1% zoom out).
-// tyOffset: screen-pixel offset added to initial ty (negative = move up).
-// Per-country zoom adjustments applied to Swift's auto-crop scale.
-// tyOffset is 0 for all — Swift's prepare() already places crown at ovalOuterTop
-// (the green line) via scanHeadBounds. Manual ty offset would fight that.
-const COUNTRY_AUTO_ADJ: Record<string, { zoomSteps: number; tyOffset: number }> = {
-  USA: { zoomSteps: 1, tyOffset: 8 },   // 1 ZOOM_STEP out, position unchanged
-  IND: { zoomSteps: 1, tyOffset: 8 },
-  GBR: { zoomSteps: 1, tyOffset: 24 },  // 1 ZOOM_STEP out, position unchanged
-  SCH: { zoomSteps: 1, tyOffset: 24 },
-  DEU: { zoomSteps: 1, tyOffset: 24 },
-  ZAF: { zoomSteps: 1, tyOffset: 24 },
-  AUS: { zoomSteps: 1, tyOffset: 24 },
-  CAN: { zoomSteps: 0, tyOffset: 0 },   // no change
-};
+const ZOOM_STEP = 0.02;
 
 export default function AdjustScreen() {
   const navigation = useNavigation<any>();
@@ -88,25 +71,19 @@ export default function AdjustScreen() {
   const country = countryRaw ?? 'USA';
   const { w: OVW, h: OVH } = getOverlaySize(country);
 
-  // MIN_SCALE/MAX_SCALE must be declared BEFORE computeAutoTransform() is called
-  // (const is not hoisted — accessing it before declaration returns undefined → NaN scale)
-  const MIN_SCALE = 0.05; const MAX_SCALE = 4.0;
-
   function computeAutoTransform() {
-    const adj = COUNTRY_AUTO_ADJ[country] ?? { zoomSteps: 0, tyOffset: 0 };
     if (autoCrop && autoCrop.w > 0 && autoCrop.h > 0) {
-      const sBase = OVW / autoCrop.w;
-      const s  = Math.max(MIN_SCALE, sBase - adj.zoomSteps * ZOOM_STEP);
+      const s = OVW / autoCrop.w;
       const tx = -(autoCrop.x + autoCrop.w / 2 - origW / 2) * s;
-      const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s + adj.tyOffset;
+      const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s;
       return { scale: s, tx, ty };
     }
-    const sBase = Math.max(OVW / origW, OVH / origH);
-    const s = Math.max(MIN_SCALE, sBase - adj.zoomSteps * ZOOM_STEP);
-    return { scale: s, tx: 0, ty: adj.tyOffset };
+    const s = Math.max(OVW / origW, OVH / origH);
+    return { scale: s, tx: 0, ty: 0 };
   }
 
   const autoT = computeAutoTransform();
+  const MIN_SCALE = 0.3; const MAX_SCALE = 4.0;
   const BRIGHTNESS_STEP = 5;
   const MIN_BRIGHTNESS = -50; const MAX_BRIGHTNESS = 50;
 
@@ -184,7 +161,7 @@ export default function AdjustScreen() {
       const cropW = Math.round(OVW / scale);
       const cropH = Math.round(OVH / scale);
 
-      const outW = country === 'CAN' ? 1200 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 900 : 600;
+      const outW = country === 'CAN' ? 1200 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 933 : 600;
       const outH = country === 'CAN' ? 1680 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 1200 : 600;
 
       // Call native module instead of HTTP API

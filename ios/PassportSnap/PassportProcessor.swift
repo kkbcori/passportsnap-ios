@@ -56,8 +56,8 @@ class PassportProcessor: NSObject {
     // En3: UK/AUS  zoom out 8% (4 clicks), up 4.25 clicks → faceMm 32.1→29.5, ovalTop 133→47
     // En4: CAN     no zoom change, up 3 clicks → ovalTop 240→160
     private static let US_SPEC  = Spec(outW:600,  outH:600,  photoHeightMm:51.0, faceMm:31.2, gapMm:1.9,  ovalOuterTop:22,  ovalOuterBottom:389,  hairMult:1.12)
-    private static let UK_SPEC  = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
-    private static let AUS_SPEC = Spec(outW:900,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
+    private static let UK_SPEC  = Spec(outW:933,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
+    private static let AUS_SPEC = Spec(outW:933,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
     private static let CAN_SPEC = Spec(outW:1200, outH:1680, photoHeightMm:70.0, faceMm:34.3, gapMm:6.7,  ovalOuterTop:160, ovalOuterBottom:983,  hairMult:1.075)
 
     private func getSpec(_ country: String) -> Spec {
