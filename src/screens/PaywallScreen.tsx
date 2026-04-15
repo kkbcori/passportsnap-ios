@@ -11,7 +11,7 @@ import {
 
 import Purchases from 'react-native-purchases';
 
-// Product IDs (must match Google Play Console + RevenueCat exactly):
+// Product IDs (must match App Store Connect + RevenueCat exactly):
 const PRODUCT_SINGLE = 'passport_single';   // $1.59 — single photo
 const PRODUCT_4X6    = 'passport_4x6';      // $1.59 — 4x6 print sheet
 const PRODUCT_BUNDLE = 'passport_bundle';   // $2.49 — both files
@@ -193,7 +193,7 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
 
           {/* Trust footer */}
           <View style={styles.trust}>
-            <Text style={styles.trustText}>🔐  Secure payment via Google Play</Text>
+            <Text style={styles.trustText}>🔐  Secure payment via Apple</Text>
             <Text style={styles.trustText}>↩  No subscription · One-time purchase</Text>
             <Text style={styles.trustText}>📸  Photo processed locally · Never stored</Text>
           </View>
