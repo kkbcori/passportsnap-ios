@@ -82,8 +82,11 @@ export default function AdjustScreen() {
     return { scale: s, tx: 0, ty: 0 };
   }
 
+  // MIN_SCALE must be declared BEFORE computeAutoTransform() —
+  // const is not hoisted; accessing it before declaration = undefined → NaN scale → blank screen
+  const MIN_SCALE = 0.05; const MAX_SCALE = 4.0;
+
   const autoT = computeAutoTransform();
-  const MIN_SCALE = 0.3; const MAX_SCALE = 4.0;
   const BRIGHTNESS_STEP = 5;
   const MIN_BRIGHTNESS = -50; const MAX_BRIGHTNESS = 50;
 

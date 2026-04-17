@@ -11,6 +11,7 @@ import ImageInputScreen    from './src/screens/ImageInputScreen';
 import ProcessingScreen    from './src/screens/ProcessingScreen';
 import AdjustScreen        from './src/screens/AdjustScreen';
 import PreviewScreen       from './src/screens/PreviewScreen';
+import { Platform } from 'react-native';
 import Purchases           from 'react-native-purchases';
 
 const Stack = createNativeStackNavigator();
@@ -18,9 +19,12 @@ const Stack = createNativeStackNavigator();
 export default function App() {
   useEffect(() => {
 	try {
-    Purchases.configure({
-      apiKey: 'goog_SOrjKfCqKpWRTpijBLZZCFIITPn',
-    });
+    const RC_KEY = Platform.select({
+      ios:     'appl_pGguxETWNpkUmafVKgZjXPBOzWh',  // ← paste your RC iOS Public SDK key here
+      android: 'goog_SOrjKfCqKpWRTpijBLZZCFIITPn',
+      default: 'goog_SOrjKfCqKpWRTpijBLZZCFIITPn',
+    }) ?? 'goog_SOrjKfCqKpWRTpijBLZZCFIITPn';
+    Purchases.configure({ apiKey: RC_KEY });
   } catch (e) {
     console.warn('RevenueCat init failed:', e);
   }
