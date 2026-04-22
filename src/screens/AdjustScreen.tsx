@@ -69,16 +69,15 @@ const ZOOM_STEP = 0.01;  // 1% per button click
 // tyOffset:  px offset on initial ty. Now 0 — Swift prepare() handles positioning.
 const COUNTRY_AUTO_ADJ: Record<string, { zoomSteps: number; tyOffset: number }> = {
   // zoomSteps: zoom out (1 step = 1% smaller face)
-  // tyOffset: positive = image moves DOWN = hair drops toward green line
-  // Hair was ~61 logical pts above green line → need ~56px more shift down
-  USA: { zoomSteps: 6,  tyOffset: 56 },
-  IND: { zoomSteps: 6,  tyOffset: 56 },
-  GBR: { zoomSteps: 10, tyOffset: 56 },
-  SCH: { zoomSteps: 10, tyOffset: 56 },
-  DEU: { zoomSteps: 10, tyOffset: 56 },
-  ZAF: { zoomSteps: 10, tyOffset: 56 },
-  AUS: { zoomSteps: 10, tyOffset: 56 },
-  CAN: { zoomSteps: 8,  tyOffset: 56 },
+  // tyOffset: 56 - 40 (5 up clicks × 8px) = 16px
+  USA: { zoomSteps: 6,  tyOffset: 16 },
+  IND: { zoomSteps: 6,  tyOffset: 16 },
+  GBR: { zoomSteps: 10, tyOffset: 16 },
+  SCH: { zoomSteps: 10, tyOffset: 16 },
+  DEU: { zoomSteps: 10, tyOffset: 16 },
+  ZAF: { zoomSteps: 10, tyOffset: 16 },
+  AUS: { zoomSteps: 10, tyOffset: 16 },
+  CAN: { zoomSteps: 8,  tyOffset: 16 },
 };
 
 export default function AdjustScreen() {
