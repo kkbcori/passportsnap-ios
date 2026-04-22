@@ -68,14 +68,14 @@ const ZOOM_STEP_ADJ = 0.01; // alias kept for clarity
 // zoomSteps: subtracted from base auto-crop scale (1 step = 1% zoom out).
 // tyOffset:  px offset on initial ty. Now 0 — Swift prepare() handles positioning.
 const COUNTRY_AUTO_ADJ: Record<string, { zoomSteps: number; tyOffset: number }> = {
-  USA: { zoomSteps: 4, tyOffset: 18 },  // 2.2 clicks down = 18px
-  IND: { zoomSteps: 4, tyOffset: 18 },
-  GBR: { zoomSteps: 4, tyOffset: 18 },
-  SCH: { zoomSteps: 4, tyOffset: 18 },
-  DEU: { zoomSteps: 4, tyOffset: 18 },
-  ZAF: { zoomSteps: 4, tyOffset: 18 },
-  AUS: { zoomSteps: 4, tyOffset: 18 },
-  CAN: { zoomSteps: 3, tyOffset: 18 },
+  USA: { zoomSteps: 1, tyOffset: 18 },  // 1 click zoom out, position unchanged
+  IND: { zoomSteps: 1, tyOffset: 18 },
+  GBR: { zoomSteps: 5, tyOffset: 18 },  // 5 clicks zoom out, position unchanged
+  SCH: { zoomSteps: 5, tyOffset: 18 },
+  DEU: { zoomSteps: 5, tyOffset: 18 },
+  ZAF: { zoomSteps: 5, tyOffset: 18 },
+  AUS: { zoomSteps: 5, tyOffset: 18 },
+  CAN: { zoomSteps: 5, tyOffset: 18 },
 };
 const ZOOM_STEP = 0.01;
 
