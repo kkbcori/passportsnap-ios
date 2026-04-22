@@ -62,7 +62,22 @@ function getOverlaySize(country?: string) {
 }
 
 const NUDGE_PX = 8;
-const ZOOM_STEP = 0.02;
+const ZOOM_STEP_ADJ = 0.01; // alias kept for clarity
+
+// Per-country auto-positioning.
+// zoomSteps: subtracted from base auto-crop scale (1 step = 1% zoom out).
+// tyOffset:  px offset on initial ty. Now 0 — Swift prepare() handles positioning.
+const COUNTRY_AUTO_ADJ: Record<string, { zoomSteps: number; tyOffset: number }> = {
+  USA: { zoomSteps: 4, tyOffset: 0 },
+  IND: { zoomSteps: 4, tyOffset: 0 },
+  GBR: { zoomSteps: 4, tyOffset: 0 },
+  SCH: { zoomSteps: 4, tyOffset: 0 },
+  DEU: { zoomSteps: 4, tyOffset: 0 },
+  ZAF: { zoomSteps: 4, tyOffset: 0 },
+  AUS: { zoomSteps: 4, tyOffset: 0 },
+  CAN: { zoomSteps: 3, tyOffset: 0 },
+};
+const ZOOM_STEP = 0.01;
 
 export default function AdjustScreen() {
   const navigation = useNavigation<any>();
@@ -71,15 +86,21 @@ export default function AdjustScreen() {
   const country = countryRaw ?? 'USA';
   const { w: OVW, h: OVH } = getOverlaySize(country);
 
+  // MIN_SCALE must be declared BEFORE computeAutoTransform() is called
+  const MIN_SCALE = 0.05; const MAX_SCALE = 4.0;
+
   function computeAutoTransform() {
+    const adj = COUNTRY_AUTO_ADJ[country] ?? { zoomSteps: 0, tyOffset: 0 };
     if (autoCrop && autoCrop.w > 0 && autoCrop.h > 0) {
-      const s = OVW / autoCrop.w;
+      const sBase = OVW / autoCrop.w;
+      const s  = Math.max(MIN_SCALE, sBase - adj.zoomSteps * ZOOM_STEP);
       const tx = -(autoCrop.x + autoCrop.w / 2 - origW / 2) * s;
-      const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s;
+      const ty = -(autoCrop.y + autoCrop.h / 2 - origH / 2) * s + adj.tyOffset;
       return { scale: s, tx, ty };
     }
-    const s = Math.max(OVW / origW, OVH / origH);
-    return { scale: s, tx: 0, ty: 0 };
+    const sBase = Math.max(OVW / origW, OVH / origH);
+    const s = Math.max(MIN_SCALE, sBase - adj.zoomSteps * ZOOM_STEP);
+    return { scale: s, tx: 0, ty: adj.tyOffset };
   }
 
   // MIN_SCALE must be declared BEFORE computeAutoTransform() —
