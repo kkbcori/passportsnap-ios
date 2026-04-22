@@ -32,33 +32,38 @@ class PassportProcessor: NSObject {
     @objc static func requiresMainQueueSetup() -> Bool { false }
 
     // MARK: ── Country Specs ───────────────────────────────────────────────────
-    // All values derived from the spreadsheet supplied by the developer.
-    // ovalOuterTop  = gapMm × pxPerMm  (top gap from spec)
-    // ovalOuterBottom = ovalOuterTop + faceMm × pxPerMm
-    // topGap = 0  →  headTop lands exactly at ovalOuterTop (the green line)
+    // Specs mirror Android PassportProcessorModule.kt exactly.
+    // oval_fill:    head fills this fraction of oval height (same as Android)
+    // topGap:       fraction of oval height for top gap — US only
+    // headTopMm:    absolute mm from top of photo to crown — UK/AUS/CAN
+    // hairMult:     hair above Vision forehead bbox (same as Android)
 
     struct Spec {
         let outW: Int; let outH: Int
-        let photoHeightMm: Double  // physical height of photo in mm
-        let faceMm: Double         // crown-to-chin in mm (from spreadsheet "In-App face" column)
-        let gapMm: Double          // gap from top of photo to crown (from spreadsheet)
-        // Derived pixel values (computed at init)
-        let ovalOuterTop: Int      // = gapMm × pxPerMm — where green line sits
-        let ovalOuterBottom: Int   // = ovalOuterTop + faceMm × pxPerMm
-        let hairMult: Double       // used as fallback if pixel scan fails
+        let photoHeightMm: Double
+        let ovalOuterTop: Int      // px: where green line is in output image
+        let ovalOuterBottom: Int   // px: bottom of oval
+        let headMinPx: Int         // minimum head height in output
+        let headMaxPx: Int         // maximum head height in output
+        let ovalFill: Double       // head fills this % of oval height
+        let topGap: Double         // % of oval height above head (US only)
+        let headTopMm: Double?     // absolute mm from top edge (UK/AUS/CAN)
+        let hairMult: Double
     }
 
-    // pxPerMm = outH / photoHeightMm
-    // US/IND: 600/51.0=11.765 px/mm  → gap=8.2mm→96px,  face=32.5mm→382px, bottom=478
-    // UK/etc: 1200/45.0=26.667 px/mm → gap=5.0mm→133px, face=32.1mm→856px, bottom=989
-    // CAN:    1680/70.0=24.000 px/mm → gap=10.0mm→240px, face=34.3mm→823px, bottom=1063
-    // En2: US/IND  zoom out 4% (2 clicks), up 5.5 clicks → faceMm 32.5→31.2, ovalTop 96→22
-    // En3: UK/AUS  zoom out 8% (4 clicks), up 4.25 clicks → faceMm 32.1→29.5, ovalTop 133→47
-    // En4: CAN     no zoom change, up 3 clicks → ovalTop 240→160
-    private static let US_SPEC  = Spec(outW:600,  outH:600,  photoHeightMm:51.0, faceMm:31.2, gapMm:1.9,  ovalOuterTop:22,  ovalOuterBottom:389,  hairMult:1.12)
-    private static let UK_SPEC  = Spec(outW:933,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
-    private static let AUS_SPEC = Spec(outW:933,  outH:1200, photoHeightMm:45.0, faceMm:29.5, gapMm:1.8,  ovalOuterTop:47,  ovalOuterBottom:835,  hairMult:1.22)
-    private static let CAN_SPEC = Spec(outW:1200, outH:1680, photoHeightMm:70.0, faceMm:34.3, gapMm:6.7,  ovalOuterTop:160, ovalOuterBottom:983,  hairMult:1.075)
+    // Values copied directly from Android PassportProcessorModule.kt companion object:
+    private static let US_SPEC  = Spec(outW:600,  outH:600,  photoHeightMm:51.0,
+        ovalOuterTop:55,  ovalOuterBottom:467,  headMinPx:300, headMaxPx:412,
+        ovalFill:0.8567, topGap:0.10, headTopMm:nil,  hairMult:1.12)
+    private static let UK_SPEC  = Spec(outW:933,  outH:1200, photoHeightMm:45.0,
+        ovalOuterTop:133, ovalOuterBottom:997,  headMinPx:820, headMaxPx:907,
+        ovalFill:0.9595, topGap:0.0,  headTopMm:6.1,  hairMult:1.22)
+    private static let AUS_SPEC = Spec(outW:933,  outH:1200, photoHeightMm:45.0,
+        ovalOuterTop:133, ovalOuterBottom:997,  headMinPx:820, headMaxPx:907,
+        ovalFill:0.9595, topGap:0.0,  headTopMm:6.1,  hairMult:1.22)
+    private static let CAN_SPEC = Spec(outW:1200, outH:1680, photoHeightMm:70.0,
+        ovalOuterTop:170, ovalOuterBottom:1116, headMinPx:614, headMaxPx:870,
+        ovalFill:0.8550, topGap:0.06, headTopMm:12.9, hairMult:1.075)
 
     private func getSpec(_ country: String) -> Spec {
         switch country {
@@ -643,70 +648,93 @@ class PassportProcessor: NSObject {
                 // 5. Background removal
                 bmp = self.whitenBackground(image: bmp, faceCx: scaledCx)
 
-                // 6. Scan white-bg result for head bounds
-                //    This mirrors web detectSubjectInWhiteBg():
-                //    headTop  = first non-white row (exact crown)
-                //    chinBottom = last skin row in central band
-                let headBounds = self.scanHeadBounds(in: bmp, faceCx: scaledCx)
-
                 let spec = self.getSpec(country)
 
-                // 7. Pad with white
+                // 6. Pad with white
                 let bmpW = Int(bmp.size.width * bmp.scale)
                 let bmpH = Int(bmp.size.height * bmp.scale)
                 let padX = max(bmpW / 2, spec.outW)
                 let padY = max(bmpH / 2, spec.outH)
                 let (padded, paddedW, paddedH) = self.padImage(bmp, padX: padX, padY: padY)
 
-                // 8. Auto-crop using head bounds
+                // 7. Auto-crop — PRIMARY: Vision face box + hairMult
+                // This is reliable across all face types: beards, dark skin,
+                // curly/sparse hair, bald. scanHeadBounds pixel-scan is the FALLBACK
+                // only when Vision detects no face (origFh == 0).
+                //
+                // scanHeadBounds was demoted because it misdetects:
+                //   - Beards: dark beard pixels detected as headTop instead of hair
+                //   - Sparse/curly hair: top rows don't hit the pixel threshold
+                //   - Any non-white pixel near top triggers false headTop
                 var cropX=0, cropY=0, cropW=0, cropH=0
 
-                if let hb = headBounds, hb.headHeight > 20 {
-                    // We have precise crown (headTop) and chin (chinBottom) from pixel scan.
-                    // Scale so headHeight maps to the country's faceMm specification.
-                    // Then place headTop at ovalOuterTop (the green line).
-                    let pxPerMm = Double(spec.outH) / spec.photoHeightMm
-                    let targetFacePx = spec.faceMm * pxPerMm          // e.g. US: 30.4mm × 11.76 = 358px
-                    let scale = targetFacePx / Double(hb.headHeight)   // how much to zoom
 
-                    // In padded coordinates
-                    let headTopP   = hb.headTop + padY
-                    let faceCxP    = hb.faceCx  + padX
+                if origFh > 0 {
+                    // PRIMARY: Vision face detection succeeded
+                    // Mirrors Android exactly: oval_fill × ovalH → targetHeadPx,
+                    // head_top_mm or topGap for vertical positioning,
+                    // 70/30 face-centre blend for horizontal stability.
+                    let fhS          = Int(Double(origFh) * procScale2)
+                    let headWithHair = Int(Double(fhS) * spec.hairMult)
+                    let hairTopY     = Int(Double(origFy) * procScale2) - Int(Double(fhS) * (spec.hairMult - 1.0))
+                    let hairTopYP    = hairTopY + padY
+                    let faceCxP      = scaledCx + padX
 
-                    // Crown lands at ovalOuterTop (the green line)
-                    let topS  = Int(Double(headTopP) * scale) - spec.ovalOuterTop
-                    let leftS = Int(Double(faceCxP)  * scale) - spec.outW / 2
+                    // Head size: oval_fill × ovalH, clamped (same as Android)
+                    let ovalH        = spec.ovalOuterBottom - spec.ovalOuterTop
+                    let targetHeadPx = min(Double(spec.headMaxPx),
+                                          max(Double(spec.headMinPx),
+                                              Double(ovalH) * spec.ovalFill))
+                    let scale        = targetHeadPx / Double(headWithHair)
+
+                    // Vertical positioning (same as Android)
+                    let targetHairTopInOutput: Int
+                    if let headTopMm = spec.headTopMm {
+                        // UK/AUS/CAN: absolute mm from top edge
+                        let pxPerMm = Double(spec.outH) / spec.photoHeightMm
+                        targetHairTopInOutput = Int(headTopMm * pxPerMm)
+                    } else {
+                        // US/IND: ovalOuterTop + topGap fraction of oval
+                        targetHairTopInOutput = spec.ovalOuterTop + Int(Double(ovalH) * spec.topGap)
+                    }
+
+                    let topS = Int(Double(hairTopYP) * scale) - targetHairTopInOutput
+
+                    // Horizontal: 70% face centre + 30% image centre (same as Android)
+                    let imgCxP    = Double(paddedW) / 2.0
+                    let blendedCx = Double(faceCxP) * 0.7 + imgCxP * 0.3
+                    let leftS     = Int(blendedCx * scale) - spec.outW / 2
 
                     cropX = Int((Double(leftS) / scale).rounded())
                     cropY = Int((Double(topS)  / scale).rounded())
                     cropW = Int((Double(spec.outW) / scale).rounded())
-                    // Derive cropH from cropW using exact spec aspect ratio
-                    // to prevent independent rounding causing stretched output
                     cropH = Int((Double(cropW) * Double(spec.outH) / Double(spec.outW)).rounded())
 
                 } else {
-                    // Fallback: use Vision face box + hairMult (same as Android)
-                    let hairMult = spec.hairMult
-                    let fhS  = Int(Double(origFh) * procScale2)
-                    let headWithHair = Int(Double(fhS) * hairMult)
-                    let hairTopY = Int(Double(origFy) * procScale2) - Int(Double(fhS) * (hairMult - 1.0))
-                    let hairTopYP = hairTopY + padY
-                    let faceCxP   = scaledCx + padX
-
-                    let ovalH = spec.ovalOuterBottom - spec.ovalOuterTop
-                    let pxPerMm = Double(spec.outH) / spec.photoHeightMm
-                    let targetFacePx = spec.faceMm * pxPerMm
-                    let scale = targetFacePx / Double(headWithHair)
-
-                    let topS  = Int(Double(hairTopYP) * scale) - spec.ovalOuterTop
-                    let leftS = Int(Double(faceCxP)   * scale) - spec.outW / 2
-
-                    cropX = Int((Double(leftS) / scale).rounded())
-                    cropY = Int((Double(topS)  / scale).rounded())
-                    cropW = Int((Double(spec.outW) / scale).rounded())
-                    // Derive cropH from cropW using exact spec aspect ratio
-                    // to prevent independent rounding causing stretched output
-                    cropH = Int((Double(cropW) * Double(spec.outH) / Double(spec.outW)).rounded())
+                    // FALLBACK: Vision found no face — use pixel scan on white-bg image
+                    let headBounds = self.scanHeadBounds(in: bmp, faceCx: scaledCx)
+                    if let hb = headBounds, hb.headHeight > 20 {
+                        let ovalH2    = spec.ovalOuterBottom - spec.ovalOuterTop
+                    let targetHead2 = min(Double(spec.headMaxPx),
+                                         max(Double(spec.headMinPx),
+                                             Double(ovalH2) * spec.ovalFill))
+                    let scale     = targetHead2 / Double(hb.headHeight)
+                        let headTopP  = hb.headTop + padY
+                        let faceCxP   = hb.faceCx  + padX
+                        let topS      = Int(Double(headTopP) * scale) - spec.ovalOuterTop
+                        let leftS     = Int(Double(faceCxP)  * scale) - spec.outW / 2
+                        cropX = Int((Double(leftS) / scale).rounded())
+                        cropY = Int((Double(topS)  / scale).rounded())
+                        cropW = Int((Double(spec.outW) / scale).rounded())
+                        cropH = Int((Double(cropW) * Double(spec.outH) / Double(spec.outW)).rounded())
+                    } else {
+                        // Last resort: centre crop
+                        let padded_w = paddedW; let padded_h = paddedH
+                        cropW = min(padded_w, padded_h)
+                        cropH = Int((Double(cropW) * Double(spec.outH) / Double(spec.outW)).rounded())
+                        cropX = (padded_w - cropW) / 2 - padX
+                        cropY = (padded_h - cropH) / 2 - padY
+                    }
                 }
 
                 // 9. Save + resolve
