@@ -62,22 +62,24 @@ function getOverlaySize(country?: string) {
 }
 
 const NUDGE_PX = 8;
-const ZOOM_STEP_ADJ = 0.01; // alias kept for clarity
-
 // Per-country auto-positioning.
+const ZOOM_STEP = 0.01;  // 1% per button click
+
 // zoomSteps: subtracted from base auto-crop scale (1 step = 1% zoom out).
 // tyOffset:  px offset on initial ty. Now 0 — Swift prepare() handles positioning.
 const COUNTRY_AUTO_ADJ: Record<string, { zoomSteps: number; tyOffset: number }> = {
-  USA: { zoomSteps: 1, tyOffset: 18 },  // 1 click zoom out, position unchanged
-  IND: { zoomSteps: 1, tyOffset: 18 },
-  GBR: { zoomSteps: 5, tyOffset: 18 },  // 5 clicks zoom out, position unchanged
-  SCH: { zoomSteps: 5, tyOffset: 18 },
-  DEU: { zoomSteps: 5, tyOffset: 18 },
-  ZAF: { zoomSteps: 5, tyOffset: 18 },
-  AUS: { zoomSteps: 5, tyOffset: 18 },
-  CAN: { zoomSteps: 5, tyOffset: 18 },
+  // zoomSteps: zoom out (1 step = 1% smaller face)
+  // tyOffset: positive = image moves DOWN = hair drops toward green line
+  // Hair was ~61 logical pts above green line → need ~56px more shift down
+  USA: { zoomSteps: 6,  tyOffset: 56 },
+  IND: { zoomSteps: 6,  tyOffset: 56 },
+  GBR: { zoomSteps: 10, tyOffset: 56 },
+  SCH: { zoomSteps: 10, tyOffset: 56 },
+  DEU: { zoomSteps: 10, tyOffset: 56 },
+  ZAF: { zoomSteps: 10, tyOffset: 56 },
+  AUS: { zoomSteps: 10, tyOffset: 56 },
+  CAN: { zoomSteps: 8,  tyOffset: 56 },
 };
-const ZOOM_STEP = 0.01;
 
 export default function AdjustScreen() {
   const navigation = useNavigation<any>();
