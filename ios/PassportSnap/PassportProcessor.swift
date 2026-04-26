@@ -171,26 +171,32 @@ class PassportProcessor: NSObject {
         let fh: Int        // Vision face box height
     }
 
-    private func detectFace(in image: UIImage) throws -> FaceData {
-        guard let cgImage = image.cgImage else {
-            throw NSError(domain: "PP", code: 1, userInfo: [NSLocalizedDescriptionKey: "No CGImage"])
+    // Returns nil instead of throwing when no face found —
+    // prepare() handles the no-face case with a graceful centre-crop fallback.
+    private func detectFace(in image: UIImage) -> FaceData? {
+        // Try cgImage directly first; if nil (HEIF/ProRAW), render via UIGraphicsImageRenderer
+        let cgImage: CGImage
+        if let cg = image.cgImage {
+            cgImage = cg
+        } else {
+            // Force render to bitmap — handles HEIF, ProRAW, HDR formats from iPhone 17 Pro
+            let renderer = UIGraphicsImageRenderer(size: image.size)
+            let rendered = renderer.image { _ in image.draw(at: .zero) }
+            guard let cg = rendered.cgImage else { return nil }
+            cgImage = cg
         }
         let w = cgImage.width; let h = cgImage.height
         var result: FaceData?
-        var err: Error?
         let sem = DispatchSemaphore(value: 0)
 
         let req = VNDetectFaceLandmarksRequest { r, e in
             defer { sem.signal() }
-            if let e = e { err = e; return }
-            guard let observations = r.results as? [VNFaceObservation],
+            guard e == nil,
+                  let observations = r.results as? [VNFaceObservation],
                   let obs = observations.max(by: {
                       $0.boundingBox.width * $0.boundingBox.height <
                       $1.boundingBox.width * $1.boundingBox.height
-                  }) else {
-                err = NSError(domain: "PP", code: 2, userInfo: [NSLocalizedDescriptionKey: "No face"])
-                return
-            }
+                  }) else { return }
 
             let bb = obs.boundingBox
             let wF = CGFloat(w); let hF = CGFloat(h)
@@ -222,13 +228,9 @@ class PassportProcessor: NSObject {
             result = FaceData(eyeY: eyeY, faceCx: cx, fy: fy, fh: fh)
         }
 
-        try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([req])
+        try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([req])
         sem.wait()
-        if let e = err { throw e }
-        guard let r = result else {
-            throw NSError(domain: "PP", code: 3, userInfo: [NSLocalizedDescriptionKey: "Face detection returned no result"])
-        }
-        return r
+        return result
     }
 
     // MARK: ── Background Removal ─────────────────────────────────────────────
@@ -632,12 +634,20 @@ class PassportProcessor: NSObject {
                 let (procBmp, procScale) = self.downscale(bmp, maxDim: 1200)
 
                 // 3. Vision face detect → eye Y + face centre X
-                let face = try self.detectFace(in: procBmp)
+                // detectFace returns nil if no face found (instead of throwing).
+                // nil face → origFh=0 → scanHeadBounds fallback path used downstream.
+                // Also retry on full-size image if downscaled detection fails —
+                // helpful for very tight crops where the face occupies the full frame.
+                var faceOpt = self.detectFace(in: procBmp)
+                if faceOpt == nil {
+                    // Retry on original (not downscaled) — catches edge cases on Pro Max
+                    faceOpt = self.detectFace(in: bmp)
+                }
                 let inv = CGFloat(1.0 / Double(procScale))
-                let origFaceCx = Int(CGFloat(face.faceCx) * inv)
-                let origEyeY   = Int(CGFloat(face.eyeY)   * inv)
-                let origFy     = Int(CGFloat(face.fy)      * inv)
-                let origFh     = Int(CGFloat(face.fh)      * inv)
+                let origFaceCx = faceOpt.map { Int(CGFloat($0.faceCx) * inv) } ?? Int(bmp.size.width / 2)
+                let origEyeY   = faceOpt.map { Int(CGFloat($0.eyeY)   * inv) } ?? Int(bmp.size.height / 3)
+                let origFy     = faceOpt.map { Int(CGFloat($0.fy)      * inv) } ?? 0
+                let origFh     = faceOpt.map { Int(CGFloat($0.fh)      * inv) } ?? 0
 
                 // 4. Downscale to ≤2000px for processing
                 let (procBmp2, procScale2) = self.downscale(bmp, maxDim: 2000)
