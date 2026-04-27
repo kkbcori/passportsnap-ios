@@ -661,12 +661,13 @@ class PassportProcessor: NSObject {
                 let spec = self.getSpec(country)
 
                 // 6. Pad with white
-                // Pad only enough for the crop window (800px margin).
-                // bmpW/2 padding creates 4000×4000+ images → 30MB base64 → RN bridge OOM crash.
+                // padX = max(bmpW/2, outW) ensures the crop window always fits
+                // regardless of how zoomed out the user goes in AdjustScreen.
+                // JPEG quality is lowered to 0.70 to keep bridge payload ~5-8MB.
                 let bmpW = Int(bmp.size.width * bmp.scale)
                 let bmpH = Int(bmp.size.height * bmp.scale)
-                let padX = max(800, spec.outW)
-                let padY = max(800, spec.outH)
+                let padX = max(bmpW / 2, spec.outW)
+                let padY = max(bmpH / 2, spec.outH)
                 let (padded, paddedW, paddedH) = self.padImage(bmp, padX: padX, padY: padY)
 
                 // 7. Auto-crop — PRIMARY: Vision face box + hairMult
