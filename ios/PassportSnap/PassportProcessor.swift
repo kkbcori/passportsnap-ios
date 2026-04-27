@@ -661,10 +661,12 @@ class PassportProcessor: NSObject {
                 let spec = self.getSpec(country)
 
                 // 6. Pad with white
+                // Pad only enough for the crop window (800px margin).
+                // bmpW/2 padding creates 4000×4000+ images → 30MB base64 → RN bridge OOM crash.
                 let bmpW = Int(bmp.size.width * bmp.scale)
                 let bmpH = Int(bmp.size.height * bmp.scale)
-                let padX = max(bmpW / 2, spec.outW)
-                let padY = max(bmpH / 2, spec.outH)
+                let padX = max(800, spec.outW)
+                let padY = max(800, spec.outH)
                 let (padded, paddedW, paddedH) = self.padImage(bmp, padX: padX, padY: padY)
 
                 // 7. Auto-crop — PRIMARY: Vision face box + hairMult
@@ -748,7 +750,9 @@ class PassportProcessor: NSObject {
                 }
 
                 // 9. Save + resolve
-                guard let jpegData = padded.jpegData(compressionQuality: 0.92) else {
+                // Lower quality for padded preview — only used as crop source, not final output.
+                // 0.70 reduces bridge payload from ~30MB to ~8MB, preventing OOM crashes.
+                guard let jpegData = padded.jpegData(compressionQuality: 0.70) else {
                     throw NSError(domain:"PP", code:11, userInfo:[NSLocalizedDescriptionKey:"JPEG encode failed"])
                 }
                 let tmp = NSTemporaryDirectory() + "prepared_\(Int(Date().timeIntervalSince1970)).jpg"

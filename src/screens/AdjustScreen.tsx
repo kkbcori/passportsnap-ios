@@ -180,10 +180,17 @@ export default function AdjustScreen() {
       const cropX = Math.round((0 - (OVW / 2 + tx)) / scale + origW / 2);
       const cropY = Math.round((0 - (OVH / 2 + ty)) / scale + origH / 2);
       const cropW = Math.round(OVW / scale);
-      const cropH = Math.round(OVH / scale);
-
+      // Derive cropH from cropW using exact spec ratio — prevents stretch
       const outW = country === 'CAN' ? 1200 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 933 : 600;
       const outH = country === 'CAN' ? 1680 : ['GBR', 'AUS', 'SCH', 'DEU', 'ZAF'].includes(country) ? 1200 : 600;
+      const cropH = Math.round(cropW * outH / outW);
+
+      // Guard: if crop params are invalid, reset to auto and retry
+      if (cropW <= 0 || cropH <= 0 || !preparedBase64) {
+        Alert.alert('Positioning error', 'Please tap Auto to reset, then try again.');
+        setConfirming(false);
+        return;
+      }
 
       // Call native module instead of HTTP API
       const data = await PassportProcessor.crop(
