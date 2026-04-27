@@ -88,11 +88,8 @@ class PassportProcessor: NSObject {
         guard image.imageOrientation != .up else { return image }
         let sz = CGSize(width: image.size.width * image.scale,
                         height: image.size.height * image.scale)
-        UIGraphicsBeginImageContextWithOptions(sz, false, 1.0)
-        image.draw(in: CGRect(origin: .zero, size: sz))
-        let fixed = UIGraphicsGetImageFromCurrentImageContext() ?? image
-        UIGraphicsEndImageContext()
-        return fixed
+        let renderer = UIGraphicsImageRenderer(size: sz)
+        return renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
     }
 
     private func downscale(_ image: UIImage, maxDim: CGFloat) -> (UIImage, CGFloat) {
@@ -102,10 +99,8 @@ class PassportProcessor: NSObject {
         guard longer > maxDim else { return (image, 1.0) }
         let scale = maxDim / longer
         let sz = CGSize(width: (w * scale).rounded(), height: (h * scale).rounded())
-        UIGraphicsBeginImageContextWithOptions(sz, false, 1.0)
-        image.draw(in: CGRect(origin: .zero, size: sz))
-        let out = UIGraphicsGetImageFromCurrentImageContext() ?? image
-        UIGraphicsEndImageContext()
+        let rendererDS = UIGraphicsImageRenderer(size: sz)
+        let out = rendererDS.image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
         return (out, scale)
     }
 
@@ -135,12 +130,12 @@ class PassportProcessor: NSObject {
         let ow = Int(image.size.width * image.scale)
         let oh = Int(image.size.height * image.scale)
         let nw = ow + 2 * padX; let nh = oh + 2 * padY
-        UIGraphicsBeginImageContextWithOptions(CGSize(width: nw, height: nh), true, 1.0)
-        UIColor.white.setFill()
-        UIRectFill(CGRect(x: 0, y: 0, width: nw, height: nh))
-        image.draw(at: CGPoint(x: padX, y: padY))
-        let padded = UIGraphicsGetImageFromCurrentImageContext() ?? image
-        UIGraphicsEndImageContext()
+        let rendererPad = UIGraphicsImageRenderer(size: CGSize(width: nw, height: nh))
+        let padded = rendererPad.image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: nw, height: nh))
+            image.draw(at: CGPoint(x: padX, y: padY))
+        }
         return (padded, nw, nh)
     }
 
@@ -153,11 +148,8 @@ class PassportProcessor: NSObject {
     }
 
     private func resizeImage(_ image: UIImage, toPixelSize size: CGSize) -> UIImage? {
-        UIGraphicsBeginImageContextWithOptions(size, true, 1.0)
-        image.draw(in: CGRect(origin: .zero, size: size))
-        let r = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        return r
+        let rendererResize = UIGraphicsImageRenderer(size: size)
+        return rendererResize.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
     }
 
     // MARK: ── Face Detection (Vision) ────────────────────────────────────────
@@ -544,24 +536,22 @@ class PassportProcessor: NSObject {
     private func addWatermark(_ image: UIImage) -> UIImage {
         let w = image.size.width * image.scale
         let h = image.size.height * image.scale
-        UIGraphicsBeginImageContextWithOptions(CGSize(width:w, height:h), false, 1.0)
-        defer { UIGraphicsEndImageContext() }
-        image.draw(at: .zero)
-        guard let ctx = UIGraphicsGetCurrentContext() else {
-            return UIGraphicsGetImageFromCurrentImageContext() ?? image
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: w, height: h))
+        return renderer.image { ctx in
+            image.draw(at: .zero)
+            let fs = max(28, w/5) * 0.70
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: fs),
+                .foregroundColor: UIColor(white: 0.55, alpha: 0.35),
+            ]
+            let text = "PassportSnap" as NSString
+            let ts = text.size(withAttributes: attrs)
+            let cgCtx = ctx.cgContext
+            cgCtx.saveGState()
+            cgCtx.translateBy(x: w/2, y: h/2); cgCtx.rotate(by: -30 * .pi / 180)
+            text.draw(at: CGPoint(x: -ts.width/2, y: -ts.height/2), withAttributes: attrs)
+            cgCtx.restoreGState()
         }
-        let fs = max(28, w/5) * 0.70
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: UIFont.boldSystemFont(ofSize: fs),
-            .foregroundColor: UIColor(white: 0.55, alpha: 0.35),
-        ]
-        let text = "PassportSnap" as NSString
-        let ts = text.size(withAttributes: attrs)
-        ctx.saveGState()
-        ctx.translateBy(x: w/2, y: h/2); ctx.rotate(by: -30 * .pi / 180)
-        text.draw(at: CGPoint(x: -ts.width/2, y: -ts.height/2), withAttributes: attrs)
-        ctx.restoreGState()
-        return UIGraphicsGetImageFromCurrentImageContext() ?? image
     }
 
     /// En1: subtle 1–2% saturation/vibrance boost to make face colours more vivid.
@@ -602,19 +592,21 @@ class PassportProcessor: NSObject {
         case "CAN":                         (pw,ph)=(591,827)
         default:                            (pw,ph)=(600,600)
         }
-        UIGraphicsBeginImageContextWithOptions(CGSize(width:sW, height:sH), true, 1.0)
-        defer { UIGraphicsEndImageContext() }
-        UIColor.white.setFill(); UIRectFill(CGRect(x:0,y:0,width:sW,height:sH))
-        let slotW=pw+2*border, slotH=ph+2*border
-        let startX=(sW-slotW)/2, gap: CGFloat=40
-        let startY=(sH-(2*slotH+gap))/2
-        UIColor.black.setStroke()
-        for i in 0...1 {
-            let sy=startY+CGFloat(i)*(slotH+gap)
-            photo.draw(in: CGRect(x:startX+border, y:sy+border, width:pw, height:ph))
-            UIBezierPath(rect: CGRect(x:startX, y:sy, width:slotW, height:slotH)).stroke()
+        let sheetRenderer = UIGraphicsImageRenderer(size: CGSize(width: sW, height: sH))
+        let sheetResult = sheetRenderer.image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: sW, height: sH))
+            let slotW=pw+2*border, slotH=ph+2*border
+            let startX=(sW-slotW)/2, gap: CGFloat=40
+            let startY=(sH-(2*slotH+gap))/2
+            UIColor.black.setStroke()
+            for i in 0...1 {
+                let sy=startY+CGFloat(i)*(slotH+gap)
+                photo.draw(in: CGRect(x:startX+border, y:sy+border, width:pw, height:ph))
+                UIBezierPath(rect: CGRect(x:startX, y:sy, width:slotW, height:slotH)).stroke()
+            }
         }
-        return UIGraphicsGetImageFromCurrentImageContext()
+        return sheetResult
     }
 
     // MARK: ── prepare() ───────────────────────────────────────────────────────
@@ -789,14 +781,11 @@ class PassportProcessor: NSObject {
                     throw NSError(domain:"PP", code:20, userInfo:[NSLocalizedDescriptionKey:"Decode failed"])
                 }
 
-                // src is already pre-padded by prepare() with bmpW/2 margins.
-                // Do NOT re-pad here — that creates a double-padded 8000×8000+ image → OOM crash.
-                // Instead just use src directly; cropX/cropY are in pre-padded coordinates.
-                let pw = Int(src.size.width  * src.scale)
-                let ph = Int(src.size.height * src.scale)
+                let pad = max(outW, max(outH, max(abs(cropX), abs(cropY))))
+                let (padded, pw, ph) = self.padImage(src, padX: pad, padY: pad)
 
-                let cx = min(max(cropX, 0), pw-1)
-                let cy = min(max(cropY, 0), ph-1)
+                let cx = min(max(cropX+pad, 0), pw-1)
+                let cy = min(max(cropY+pad, 0), ph-1)
                 // Derive ch from cw using the EXACT output aspect ratio.
                 // Independent min() clamping of cw and ch can produce different ratios
                 // → the final resize to outW×outH would then stretch the image.
@@ -815,7 +804,7 @@ class PassportProcessor: NSObject {
                     throw NSError(domain:"PP", code:21, userInfo:[NSLocalizedDescriptionKey:"Invalid crop"])
                 }
 
-                guard var cropped = self.cropImage(src,    to: CGRect(x:cx,y:cy,width:cw,height:ch)),
+                guard var cropped = self.cropImage(padded, to: CGRect(x:cx,y:cy,width:cw,height:ch)),
                       let resized = self.resizeImage(cropped, toPixelSize: CGSize(width:outW,height:outH))
                 else {
                     throw NSError(domain:"PP", code:22, userInfo:[NSLocalizedDescriptionKey:"Crop failed"])
