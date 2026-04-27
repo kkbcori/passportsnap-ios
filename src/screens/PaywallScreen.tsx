@@ -1,232 +1,335 @@
 /**
- * PaywallScreen — purchase options before download
- * Uses RevenueCat (react-native-purchases) for IAP
- * Products: passport_single ($1.59), passport_4x6 ($1.59), passport_bundle ($2.49)
+ * PreviewScreen v6.0 — On-Device Processing (no backend)
+ * Uses NativeModules.PassportProcessor.makeSheet4x6() instead of HTTP fetch
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet,
-  SafeAreaView, ActivityIndicator, Alert, Modal, ScrollView,
+  View, Text, TouchableOpacity, StyleSheet, Image,
+  SafeAreaView, ScrollView, Dimensions, Alert, ActivityIndicator, NativeModules, Linking, Platform,
 } from 'react-native';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import RNFS from 'react-native-fs';
+import PaywallScreen from './PaywallScreen';
+import { CameraRoll } from '@react-native-camera-roll/camera-roll';
+import PassportHeadOverlay from '../components/PassportHeadOverlay';
+import FloatingOrbs from '../components/FloatingOrbs';
 
-import Purchases from 'react-native-purchases';
+const { PassportProcessor } = NativeModules;
 
-// Product IDs (must match App Store Connect + RevenueCat exactly):
-const PRODUCT_SINGLE = 'passport_single';   // $1.59 — single photo
-const PRODUCT_4X6    = 'passport_4x6';      // $1.59 — 4x6 print sheet
-const PRODUCT_BUNDLE = 'passport_bundle';   // $2.49 — both files
+type RouteParams = { processedUri: string; base64?: string; cleanBase64?: string; country?: string };
 
-interface Props {
-  visible:       boolean;
-  onClose:       () => void;
-  onPurchased:   (type: 'single' | '4x6' | 'bundle') => void;
-  country?:      string;
+const SW = Dimensions.get('window').width;
+
+function getPhotoSize(country?: string) {
+  const maxW = SW - 48;
+  const ASPECTS: Record<string, number> = {
+    'GBR': 1200 / 900, 'AUS': 1200 / 900, 'CAN': 1680 / 1200,
+    'SCH': 1200 / 900, 'DEU': 1200 / 900, 'ZAF': 1200 / 900,
+  };
+  const aspect = ASPECTS[country ?? ''];
+  if (aspect) { const h = Math.round(maxW * aspect); return { w: maxW, h }; }
+  return { w: maxW, h: maxW };
 }
 
-export default function PaywallScreen({ visible, onClose, onPurchased, country }: Props) {
-  const [loading, setLoading] = useState<string | null>(null);
+export default function PreviewScreen() {
+  const navigation  = useNavigation<any>();
+  const route       = useRoute<RouteProp<Record<string, RouteParams>, string>>();
+  const { processedUri, base64, cleanBase64, country: countryRaw } = route.params;
+  const country = countryRaw ?? 'USA';
+  const countryLabel = country === 'IND' ? 'India' : country === 'GBR' ? 'UK' : country === 'AUS' ? 'Australia' : country === 'CAN' ? 'Canada' : country === 'SCH' ? 'Schengen' : country === 'DEU' ? 'Germany' : country === 'ZAF' ? 'South Africa' : 'US';
 
-  const purchase = async (type: 'single' | '4x6' | 'bundle') => {
-    const productId = type === 'single' ? PRODUCT_SINGLE : type === '4x6' ? PRODUCT_4X6 : PRODUCT_BUNDLE;
-    const entitlementId = type === 'single' ? 'download_single' : type === '4x6' ? 'download_4x6' : 'download_bundle';
-    setLoading(type);
-    try {
-      let customerInfo;
+  const { w: PHOTO_W, h: PHOTO_H } = getPhotoSize(country);
+  const [showOverlay, setShowOverlay] = useState(true);
+  const [autoToggle, setAutoToggle] = useState(true);
+  const [saving2x2, setSaving2x2] = useState(false);
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [purchaseType, setPurchaseType] = useState<'single'|'4x6'|'bundle'|null>(null);
+  const [saving4x6, setSaving4x6] = useState(false);
+  const [savingBundle, setSavingBundle] = useState(false);
+  const [preview4x6Uri, setPreview4x6Uri] = useState<string | null>(null);
 
-      // PRIMARY: Try RC offerings (works when products are approved on App Store Connect)
+  // Generate 4x6 preview on mount for "What You Get" section
+  useEffect(() => {
+    const gen4x6Preview = async () => {
       try {
-        const offerings = await Purchases.getOfferings();
-        if (offerings.current) {
-          const pkg = offerings.current.availablePackages.find(
-            p => p.product.identifier === productId
-          );
-          if (pkg) {
-            const result = await Purchases.purchasePackage(pkg);
-            customerInfo = result.customerInfo;
-          }
-        }
-      } catch (offeringsError: any) {
-        // Offerings failed — fall through to direct product purchase
-        if (offeringsError?.userCancelled) {
-          setLoading(null);
-          return; // User cancelled — do not fall through
-        }
+        const photoData = cleanBase64 ?? base64;
+        if (!photoData) return;
+        const data = await PassportProcessor.makeSheet4x6(photoData, country);
+        const previewPath = `${RNFS.CachesDirectoryPath}/preview_4x6_${Date.now()}.jpg`;
+        await RNFS.writeFile(previewPath, data.imageBase64, 'base64');
+        setPreview4x6Uri(`file://${previewPath}`);
+      } catch (e) {
+        // Silent fail — the section will just show the single photo
       }
+    };
+    gen4x6Preview();
+  }, []);
 
-      // FALLBACK: Direct product purchase via RC (works with StoreKit config file
-      // and during App Review when products are "Waiting for Review")
-      if (!customerInfo) {
-        const products = await Purchases.getProducts([productId]);
-        if (!products || products.length === 0) {
-          throw new Error('Product not available. Please check your connection and try again.');
-        }
-        const result = await Purchases.purchaseStoreProduct(products[0]);
-        customerInfo = result.customerInfo;
-      }
+  // Auto-toggle overlay every 2 seconds
+  useEffect(() => {
+    if (!autoToggle) return;
+    const interval = setInterval(() => {
+      setShowOverlay(v => !v);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [autoToggle]);
 
-      // Verify entitlement or grant access directly for consumables
-      if (customerInfo.entitlements.active[entitlementId]) {
-        onPurchased(type);
-      } else {
-        // For consumables, RC entitlements may not persist — grant access directly
-        onPurchased(type);
-      }
+  const save2x2 = () => { setPurchaseType('single'); setShowPaywall(true); };
 
-    } catch (e: any) {
-      if (!e?.userCancelled) {
-        Alert.alert('Purchase failed', e?.message ?? 'Please try again.');
+  // Request photo library permission on iOS before saving
+  const requestPhotoPermission = async (): Promise<boolean> => {
+    try {
+      const { PermissionsAndroid, Platform } = require('react-native');
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
       }
-    } finally {
-      setLoading(null);
-    }
+      // iOS: CameraRoll handles permission prompt automatically
+      return true;
+    } catch { return true; }
   };
 
-  const countryLabel =
-    country === 'GBR' ? 'UK' :
-    country === 'AUS' ? 'Australia' :
-    country === 'CAN' ? 'Canada' :
-    country === 'SCH' ? 'Schengen' :
-    country === 'DEU' ? 'Germany' :
-    country === 'ZAF' ? 'South Africa' :
-    country === 'IND' ? 'India' : 'US';
+  const doSave2x2 = async (clean: string) => {
+    try {
+      setSaving2x2(true);
+      await requestPhotoPermission();
+      const path = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
+      await RNFS.writeFile(path, clean, 'base64');
+      await CameraRoll.save(`file://${path}`, { type: 'photo' });
+      Alert.alert('Saved! ✓', 'Clean passport photo saved to gallery.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message ?? 'Could not save photo. Please allow photo library access in Settings.');
+    } finally { setSaving2x2(false); }
+  };
+
+  const save4x6 = async (overrideBase64?: string) => {
+    const photoData = overrideBase64 ?? cleanBase64 ?? base64;
+    if (!photoData) { Alert.alert('Error', 'Photo data missing.'); return; }
+    try {
+      setSaving4x6(true);
+
+      // Call native module instead of HTTP API
+      const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
+
+      const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
+      await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
+      await CameraRoll.save(`file://${sheetPath}`, { type: 'photo' });
+      Alert.alert('Saved!', '4x6 print sheet saved to gallery.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message ?? 'Could not create 4x6 sheet.');
+    } finally { setSaving4x6(false); }
+  };
+
+  const saveBundle = async (photoData: string) => {
+    try {
+      setSavingBundle(true);
+      // Save single photo
+      const singlePath = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
+      await RNFS.writeFile(singlePath, photoData, 'base64');
+      await CameraRoll.save(`file://${singlePath}`, { type: 'photo' });
+
+      // Save 4x6 sheet
+      const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
+      const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
+      await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
+      await CameraRoll.save(`file://${sheetPath}`, { type: 'photo' });
+
+      Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message ?? 'Could not save bundle.');
+    } finally { setSavingBundle(false); }
+  };
+
+  const askForReview = () => {
+    setTimeout(() => {
+      Alert.alert(
+        'Enjoying PassportSnap?',
+        'Your photo has been saved! If PassportSnap helped you, a quick review would mean a lot to us.',
+        [
+          { text: 'Not now', style: 'cancel' },
+          {
+            text: 'Rate us ★★★★★',
+            onPress: () => {
+              const storeUrl = Platform.OS === 'ios'
+                ? 'itms-apps://itunes.apple.com/app/idAPP_STORE_ID?action=write-review'
+                : 'https://play.google.com/store/apps/details?id=com.passportsnap&showAllReviews=true';
+              Linking.openURL(storeUrl).catch(() => {});
+            },
+          },
+        ],
+        { cancelable: true }
+      );
+    }, 1500); // Delay so the save confirmation shows first
+  };
 
   return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={styles.safe}>
+      <FloatingOrbs />
+      <ScrollView contentContainerStyle={styles.scroll} bounces={false}>
 
-        {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <Text style={styles.headerTitle}>Download Your Photo</Text>
-            <Text style={styles.headerSub}>{countryLabel} Passport · Ready to use</Text>
+        <Text style={styles.title}>Your Passport Photo</Text>
+        <Text style={styles.subtitle}>{
+          country === 'GBR' ? '900×1200 px  |  35×45 mm  |  UK Compliant' :
+          country === 'AUS' ? '900×1200 px  |  35×45 mm  |  AU Compliant' :
+          country === 'CAN' ? '1200×1680 px  |  50×70 mm  |  CA Compliant' :
+          country === 'SCH' ? '900×1200 px  |  35×45 mm  |  Schengen Compliant' :
+          country === 'DEU' ? '900×1200 px  |  35×45 mm  |  Germany Compliant' :
+          country === 'ZAF' ? '900×1200 px  |  35×45 mm  |  South Africa Compliant' :
+          '600×600 px  |  2×2 in  |  300 DPI  |  ' + countryLabel + ' Compliant'
+        }</Text>
+
+        <View
+          style={[styles.photoWrap, { width: PHOTO_W, height: PHOTO_H }]}
+        >
+          <Image source={{ uri: processedUri }} style={{ width: PHOTO_W, height: PHOTO_H }} resizeMode="cover" />
+          {showOverlay && <PassportHeadOverlay size={PHOTO_W} height={PHOTO_H} showLabels={true} country={country} />}
+          <View style={styles.watermarkBadge}>
+            <Text style={styles.watermarkBadgeText}>PREVIEW — Watermark removed after purchase</Text>
           </View>
-          <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
-            <Text style={styles.closeX}>✕</Text>
-          </TouchableOpacity>
         </View>
 
-        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        <TouchableOpacity style={[styles.toggleBtn, showOverlay && styles.toggleBtnActive]}
+          onPress={() => {
+            setAutoToggle(false);  // Stop auto-toggle on manual tap
+            setShowOverlay(v => !v);
+          }} activeOpacity={0.8}>
+          <Text style={[styles.toggleText, showOverlay && styles.toggleTextActive]}>
+            {showOverlay ? 'Overlay ON' : 'Overlay OFF'}{autoToggle ? '  ·  Auto' : ''}
+          </Text>
+        </TouchableOpacity>
 
-          {/* Watermark notice */}
-          <View style={styles.noticeBanner}>
-            <Text style={styles.noticeIcon}>🔒</Text>
-            <Text style={styles.noticeText}>
-              Your photo is ready. Purchase to download without the watermark.
-            </Text>
-          </View>
-
-          {/* Products */}
-          <View style={styles.products}>
-
-            {/* Bundle — BEST VALUE */}
-            <View style={[styles.productCard, styles.productCardBundle]}>
-              <View style={styles.bundleBadge}>
-                <Text style={styles.bundleBadgeText}>BEST VALUE</Text>
-              </View>
-              <View style={styles.productTop}>
-                <View style={[styles.productIcon, styles.productIconGold]}>
-                  <Text style={styles.productEmoji}>📦</Text>
-                </View>
-                <View style={styles.productInfo}>
-                  <Text style={[styles.productName, styles.productNameGold]}>Bundle — Single + 4×6</Text>
-                  <Text style={styles.productDesc}>
-                    Both files included · Single photo + 4×6 print sheet · Save 17%
-                  </Text>
-                  <View style={styles.productTags}>
-                    <Text style={[styles.tag, styles.tagGold]}>2 files</Text>
-                    <Text style={[styles.tag, styles.tagGold]}>Best deal</Text>
-                    <Text style={[styles.tag, styles.tagGold]}>No watermark</Text>
-                  </View>
-                </View>
-              </View>
-              <TouchableOpacity
-                style={[styles.buyBtn, styles.buyBtnBundle]}
-                onPress={() => purchase('bundle')}
-                disabled={loading !== null}
-                activeOpacity={0.85}
-              >
-                {loading === 'bundle'
-                  ? <ActivityIndicator color="#0C0F1A" />
-                  : <Text style={styles.buyBtnBundleText}>Buy for <Text style={styles.buyBtnBundlePrice}>$2.49</Text></Text>
-                }
-              </TouchableOpacity>
+        <View style={styles.checkCard}>
+          <Text style={styles.checkTitle}>COMPLIANCE CHECKS</Text>
+          {(country === 'SCH' || country === 'DEU' || country === 'ZAF' ? [
+            ['Size',         '900×1200 px · 35×45 mm · ~600 DPI'],
+            ['Head height',  '29–34mm crown to chin'],
+            ['Top padding',  '15% above crown'],
+            ['Background',   'White'],
+            ['Colours',      'Original — unchanged'],
+          ] : country === 'CAN' ? [
+            ['Size',         '1200×1680 px · 50×70 mm · ~610 DPI'],
+            ['Head height',  '31–36mm chin to crown (target 33.5mm)'],
+            ['Top padding',  '12% above crown'],
+            ['Background',   'White or light-coloured'],
+            ['Colours',      'Original — unchanged'],
+          ] : country === 'GBR' ? [
+            ['Size',         '900×1200 px · 35×45 mm · ~600 DPI'],
+            ['Head height',  '29–34mm crown to chin'],
+            ['Top padding',  '15% above crown'],
+            ['Background',   'White or light grey'],
+            ['Colours',      'Original — unchanged'],
+          ] : country === 'AUS' ? [
+            ['Size',         '900×1200 px · 35×45 mm · ~600 DPI'],
+            ['Face height',  'Exactly 33mm chin to crown'],
+            ['Top padding',  'Crown at oval tip'],
+            ['Background',   'White or light grey'],
+            ['Colours',      'Original — unchanged'],
+          ] : country === 'IND' ? [
+            ['Size',            '600×600 px · 2×2 in · 300 DPI'],
+            ['Head height',     '50–69% of image'],
+            ['Eye from bottom', '56–69%'],
+            ['Background',      'White / off-white'],
+            ['Colours',         'Original — unchanged'],
+          ] : [
+            ['Size',            '600×600 px · 2×2 in · 300 DPI'],
+            ['Head height',     '1"–1⅜" · 50–69% of image'],
+            ['Eye from bottom', '1⅛"–1⅜" · 56–69%'],
+            ['Background',      'White / off-white'],
+            ['Colours',         'Original — unchanged'],
+          ]).map(([k, v]) => (
+            <View key={k} style={styles.row}>
+              <Text style={styles.rowKey}>{k}</Text>
+              <Text style={styles.rowVal}>{v}</Text>
             </View>
+          ))}
+        </View>
 
-            {/* Single photo — $1.59 */}
-            <View style={styles.productCard}>
-              <View style={styles.productTop}>
-                <View style={styles.productIcon}>
-                  <Text style={styles.productEmoji}>🖼️</Text>
-                </View>
-                <View style={styles.productInfo}>
-                  <Text style={styles.productName}>Single Photo</Text>
-                  <Text style={styles.productDesc}>
-                    One passport photo · Full resolution · No watermark
-                  </Text>
-                  <View style={styles.productTags}>
-                    <Text style={styles.tag}>Print ready</Text>
-                    <Text style={styles.tag}>300+ DPI</Text>
-                    <Text style={styles.tag}>Instant</Text>
-                  </View>
-                </View>
-              </View>
-              <TouchableOpacity
-                style={[styles.buyBtn, styles.buyBtnSecondary]}
-                onPress={() => purchase('single')}
-                disabled={loading !== null}
-                activeOpacity={0.85}
-              >
-                {loading === 'single'
-                  ? <ActivityIndicator color="#A8B1CC" />
-                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.59</Text></Text>
-                }
-              </TouchableOpacity>
+        {/* What You Get — user's actual photos */}
+        <View style={styles.wygSection}>
+          <Text style={styles.wygTitle}>WHAT YOU GET</Text>
+          <View style={styles.wygRow}>
+            <View style={styles.wygCard}>
+              <Image source={{ uri: processedUri }} style={styles.wygImgSingle} resizeMode="contain" />
+              <Text style={styles.wygLabel}>Single Photo</Text>
+              <Text style={styles.wygSub}>Print-ready, no watermark</Text>
             </View>
-
-            {/* 4×6 print sheet — $1.59 */}
-            <View style={styles.productCard}>
-              <View style={styles.productTop}>
-                <View style={styles.productIcon}>
-                  <Text style={styles.productEmoji}>🖨️</Text>
+            <View style={styles.wygCard}>
+              {preview4x6Uri ? (
+                <Image source={{ uri: preview4x6Uri }} style={styles.wygImg4x6} resizeMode="contain" />
+              ) : (
+                <View style={[styles.wygImg4x6, styles.wygPlaceholder]}>
+                  <ActivityIndicator size="small" color={C.text3} />
                 </View>
-                <View style={styles.productInfo}>
-                  <Text style={styles.productName}>4×6 Print Sheet</Text>
-                  <Text style={styles.productDesc}>
-                    2 photos on a 4×6 sheet · Take to any photo lab
-                  </Text>
-                  <View style={styles.productTags}>
-                    <Text style={styles.tag}>Print ready</Text>
-                    <Text style={styles.tag}>2 photos</Text>
-                    <Text style={styles.tag}>Lab quality</Text>
-                  </View>
-                </View>
-              </View>
-              <TouchableOpacity
-                style={[styles.buyBtn, styles.buyBtnSecondary]}
-                onPress={() => purchase('4x6')}
-                disabled={loading !== null}
-                activeOpacity={0.85}
-              >
-                {loading === '4x6'
-                  ? <ActivityIndicator color="#A8B1CC" />
-                  : <Text style={styles.buyBtnText}>Buy for <Text style={styles.buyBtnPrice}>$1.59</Text></Text>
-                }
-              </TouchableOpacity>
+              )}
+              <Text style={styles.wygLabel}>4×6 Print Sheet</Text>
+              <Text style={styles.wygSub}>2 photos, ready for any lab</Text>
             </View>
-
           </View>
+        </View>
 
-          {/* Trust footer */}
-          <View style={styles.trust}>
-            <Text style={styles.trustText}>🔐  Secure payment via Apple</Text>
-            <Text style={styles.trustText}>↩  No subscription · One-time purchase</Text>
-            <Text style={styles.trustText}>📸  Photo processed locally · Never stored</Text>
-          </View>
+        <Text style={styles.dlTitle}>Download</Text>
 
-        </ScrollView>
+        <TouchableOpacity style={styles.btn2x2} onPress={save2x2} disabled={saving2x2} activeOpacity={0.85}>
+          {saving2x2 ? <ActivityIndicator color="#fff" /> : (
+            <>
+              <Text style={styles.btn2x2Icon}>2x2</Text>
+              <View>
+                <Text style={styles.btn2x2Label}>Save 2x2 Photo</Text>
+                <Text style={styles.btn2x2Sub}>Single passport photo · No watermark · $1.50</Text>
+              </View>
+            </>
+          )}
+        </TouchableOpacity>
 
-      </SafeAreaView>
-    </Modal>
+        <TouchableOpacity style={styles.btn4x6} onPress={() => { setPurchaseType('4x6'); setShowPaywall(true); }}
+          disabled={saving4x6} activeOpacity={0.85}>
+          {saving4x6 ? <ActivityIndicator color="#3B5BDB" /> : (
+            <>
+              <Text style={styles.btn4x6Icon}>4x6</Text>
+              <View>
+                <Text style={styles.btn4x6Label}>Save 4x6 Print Sheet</Text>
+                <Text style={styles.btn4x6Sub}>2 photos side by side · No watermark · $1.50</Text>
+              </View>
+            </>
+          )}
+        </TouchableOpacity>
+
+        {/* Bundle — both files */}
+        <TouchableOpacity style={styles.btnBundle} onPress={() => { setPurchaseType('bundle'); setShowPaywall(true); }}
+          disabled={savingBundle} activeOpacity={0.85}>
+          {savingBundle ? <ActivityIndicator color="#F5A623" /> : (
+            <>
+              <View style={styles.btnBundleBadge}><Text style={styles.btnBundleBadgeText}>BEST VALUE</Text></View>
+              <Text style={styles.btnBundleIcon}>📦</Text>
+              <View>
+                <Text style={styles.btnBundleLabel}>Save Both — Single + 4×6</Text>
+                <Text style={styles.btnBundleSub}>Everything you need · No watermark · $2.49</Text>
+              </View>
+            </>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.againBtn} onPress={() => navigation.navigate('CountrySelect')}>
+          <Text style={styles.againText}>Start over</Text>
+        </TouchableOpacity>
+
+
+      </ScrollView>
+
+      <PaywallScreen visible={showPaywall} onClose={() => setShowPaywall(false)} country={country}
+        onPurchased={async (type) => {
+          setShowPaywall(false);
+          const photoData = cleanBase64 ?? base64 ?? '';
+          if (type === 'single') { await doSave2x2(photoData); }
+          else if (type === 'bundle') { await saveBundle(photoData); }
+          else { await save4x6(photoData); }
+          // Delay review prompt so the "Saved!" alert is dismissed first
+          setTimeout(() => askForReview(), 2500);
+        }}
+      />
+    </SafeAreaView>
   );
 }
 
@@ -234,65 +337,59 @@ const C = {
   bg: '#0C0F1A', surface: '#151929', border: '#1E2438',
   text1: '#F0F2FF', text2: '#A8B1CC', text3: '#6B7294',
   accent: '#2B59C3', accentLight: 'rgba(43,89,195,0.15)',
-  gold: '#F5A623', goldBg: 'rgba(245,166,35,0.10)', goldBorder: 'rgba(245,166,35,0.35)',
+  emerald: '#1DB954', gold: '#F5A623',
 };
-
 const styles = StyleSheet.create({
-  safe:               { flex: 1, backgroundColor: C.bg },
-  scrollContent:      { paddingBottom: 24 },
+  safe:        { flex: 1, backgroundColor: C.bg },
+  scroll:      { padding: 24, paddingBottom: 48, alignItems: 'center' },
+  title:       { fontSize: 20, fontWeight: '700', color: C.text1, letterSpacing: -0.3, marginBottom: 4 },
+  subtitle:    { fontSize: 12, color: C.text3, marginBottom: 20, textAlign: 'center' },
+  photoWrap:   { borderRadius: 6, overflow: 'hidden', marginBottom: 12, borderWidth: 1, borderColor: C.border, position: 'relative' },
+  watermarkBadge: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(12,15,26,0.75)', paddingVertical: 6, paddingHorizontal: 12, alignItems: 'center' },
+  watermarkBadgeText: { color: C.gold, fontSize: 10, fontWeight: '700', letterSpacing: 0.5 },
+  toggleBtn:       { backgroundColor: C.surface, borderRadius: 10, paddingHorizontal: 16, paddingVertical: 8, marginBottom: 14, borderWidth: 1, borderColor: C.border },
+  toggleBtnActive: { backgroundColor: C.accent, borderColor: C.accent },
+  toggleText:      { fontSize: 12, color: C.text2, fontWeight: '600' },
+  toggleTextActive:{ color: '#FFFFFF' },
+  legend:      { alignSelf: 'stretch', backgroundColor: C.surface, borderRadius: 14, padding: 14, marginBottom: 16, borderWidth: 1, borderColor: C.border },
+  legendTitle: { fontSize: 10, fontWeight: '700', color: C.gold, letterSpacing: 1.5, marginBottom: 10 },
+  legendRow:   { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8 },
+  swatch:      { width: 22, height: 14, borderRadius: 3, borderWidth: 2, marginRight: 8, marginTop: 2 },
+  legendText:  { fontSize: 12, color: C.text2, flex: 1, lineHeight: 17 },
+  checkCard:   { alignSelf: 'stretch', backgroundColor: C.surface, borderRadius: 14, padding: 16, marginBottom: 20, borderWidth: 1, borderColor: C.border },
+  checkTitle:  { fontSize: 10, fontWeight: '700', color: C.gold, letterSpacing: 1.5, marginBottom: 10 },
+  row:         { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 7, flexWrap: 'wrap' },
+  rowKey:      { fontSize: 13, fontWeight: '600', color: C.text1, flex: 1 },
+  rowVal:      { fontSize: 12, color: C.text2, flex: 1.5, textAlign: 'right' },
+  dlTitle:     { fontSize: 14, fontWeight: '700', color: C.text1, alignSelf: 'flex-start', marginBottom: 10 },
+  btn2x2:      { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: C.accent, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, alignSelf: 'stretch', marginBottom: 10 },
+  btn2x2Icon:  { fontSize: 12, fontWeight: '700', color: '#FFFFFF', backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, overflow: 'hidden', minWidth: 38, textAlign: 'center' },
+  btn2x2Label: { color: '#FFFFFF', fontSize: 15, fontWeight: '600' },
+  btn2x2Sub:   { color: 'rgba(255,255,255,0.55)', fontSize: 11 },
+  btn4x6:      { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: C.surface, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, alignSelf: 'stretch', marginBottom: 20, borderWidth: 1, borderColor: C.border },
+  btn4x6Icon:  { fontSize: 12, fontWeight: '700', color: '#4A7AE8', backgroundColor: C.accentLight, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, overflow: 'hidden', minWidth: 38, textAlign: 'center' },
+  btn4x6Label: { color: C.text1, fontSize: 15, fontWeight: '600' },
+  btn4x6Sub:   { color: C.text3, fontSize: 11 },
+  againBtn:    { paddingVertical: 14, paddingHorizontal: 36, marginTop: 8, backgroundColor: C.surface, borderRadius: 14, alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  againText:   { color: C.text2, fontSize: 15, fontWeight: '600' },
 
-  header:             { flexDirection: 'row', alignItems: 'center',
-                        backgroundColor: C.bg, padding: 20, paddingBottom: 16,
-                        borderBottomWidth: 1, borderBottomColor: C.border },
-  headerLeft:         { flex: 1 },
-  headerTitle:        { fontSize: 18, fontWeight: '700', color: C.text1 },
-  headerSub:          { fontSize: 12, color: C.text3, marginTop: 2 },
-  closeBtn:           { width: 32, height: 32, borderRadius: 16,
-                        backgroundColor: C.surface,
-                        alignItems: 'center', justifyContent: 'center' },
-  closeX:             { color: C.text3, fontSize: 14, fontWeight: '500' },
 
-  noticeBanner:       { flexDirection: 'row', alignItems: 'center', gap: 10,
-                        backgroundColor: C.accentLight, margin: 16, borderRadius: 10,
-                        padding: 12, borderWidth: 1, borderColor: 'rgba(43,89,195,0.25)' },
-  noticeIcon:         { fontSize: 16 },
-  noticeText:         { flex: 1, fontSize: 12, color: '#4A7AE8', lineHeight: 17 },
+  // What You Get
+  wygSection:  { alignSelf: 'stretch', marginTop: 20, marginBottom: 4 },
+  wygTitle:    { fontSize: 11, fontWeight: '700', color: C.gold, letterSpacing: 1.5, marginBottom: 12 },
+  wygRow:      { flexDirection: 'row', gap: 12 },
+  wygCard:     { flex: 1, backgroundColor: C.surface, borderRadius: 12, padding: 10, alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  wygImgSingle:{ width: 100, height: 100, borderRadius: 6, marginBottom: 8 },
+  wygImg4x6:  { width: 80, height: 120, borderRadius: 6, marginBottom: 8 },
+  wygPlaceholder: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  wygLabel:    { fontSize: 12, fontWeight: '600', color: C.text1, marginBottom: 2 },
+  wygSub:      { fontSize: 10, color: C.text3, textAlign: 'center' },
 
-  products:           { paddingHorizontal: 16, gap: 12 },
-
-  productCard:        { backgroundColor: C.surface, borderRadius: 14, padding: 18,
-                        borderWidth: 1, borderColor: C.border },
-  productCardBundle:  { borderColor: C.goldBorder, borderWidth: 1.5, position: 'relative', marginTop: 4 },
-
-  bundleBadge:        { position: 'absolute', top: -11, alignSelf: 'center',
-                        backgroundColor: C.gold, borderRadius: 6,
-                        paddingHorizontal: 12, paddingVertical: 3 },
-  bundleBadgeText:    { fontSize: 9, fontWeight: '700', color: '#0C0F1A', letterSpacing: 1.5 },
-
-  productTop:         { flexDirection: 'row', gap: 14, marginBottom: 16 },
-  productIcon:        { width: 44, height: 44, borderRadius: 10,
-                        backgroundColor: 'rgba(43,89,195,0.10)',
-                        alignItems: 'center', justifyContent: 'center' },
-  productIconGold:    { backgroundColor: C.goldBg },
-  productEmoji:       { fontSize: 22 },
-  productInfo:        { flex: 1 },
-  productName:        { fontSize: 15, fontWeight: '700', color: C.text1, marginBottom: 3 },
-  productNameGold:    { color: C.gold },
-  productDesc:        { fontSize: 12, color: C.text3, lineHeight: 17, marginBottom: 8 },
-  productTags:        { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  tag:                { backgroundColor: 'rgba(43,89,195,0.08)', borderRadius: 6,
-                        paddingHorizontal: 8, paddingVertical: 3,
-                        fontSize: 10, color: C.text2, fontWeight: '500', overflow: 'hidden' },
-  tagGold:            { backgroundColor: C.goldBg, color: C.gold },
-
-  buyBtn:             { borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
-  buyBtnSecondary:    { backgroundColor: 'rgba(43,89,195,0.10)', borderWidth: 1, borderColor: 'rgba(43,89,195,0.20)' },
-  buyBtnBundle:       { backgroundColor: C.gold },
-  buyBtnText:         { fontSize: 14, fontWeight: '600', color: C.text2 },
-  buyBtnPrice:        { fontSize: 15, fontWeight: '700', color: C.text1 },
-  buyBtnBundleText:   { fontSize: 15, fontWeight: '700', color: '#0C0F1A' },
-  buyBtnBundlePrice:  { fontSize: 16, fontWeight: '800' },
-
-  trust:              { padding: 24, gap: 6, marginTop: 8 },
-  trustText:          { fontSize: 11, color: C.text3, textAlign: 'center', lineHeight: 18 },
+  // Bundle button
+  btnBundle:   { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: 'rgba(245,166,35,0.08)', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, alignSelf: 'stretch', marginBottom: 20, borderWidth: 1.5, borderColor: 'rgba(245,166,35,0.35)', position: 'relative', overflow: 'hidden' },
+  btnBundleBadge: { position: 'absolute', top: 0, right: 0, backgroundColor: C.gold, borderBottomLeftRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  btnBundleBadgeText: { fontSize: 8, fontWeight: '800', color: '#0C0F1A', letterSpacing: 0.5 },
+  btnBundleIcon: { fontSize: 20 },
+  btnBundleLabel: { color: C.gold, fontSize: 15, fontWeight: '700' },
+  btnBundleSub: { color: 'rgba(245,166,35,0.6)', fontSize: 11 },
 });
