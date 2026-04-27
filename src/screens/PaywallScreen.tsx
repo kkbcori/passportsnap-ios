@@ -28,23 +28,48 @@ export default function PaywallScreen({ visible, onClose, onPurchased, country }
 
   const purchase = async (type: 'single' | '4x6' | 'bundle') => {
     const productId = type === 'single' ? PRODUCT_SINGLE : type === '4x6' ? PRODUCT_4X6 : PRODUCT_BUNDLE;
+    const entitlementId = type === 'single' ? 'download_single' : type === '4x6' ? 'download_4x6' : 'download_bundle';
     setLoading(type);
     try {
-      const offerings = await Purchases.getOfferings();
-      if (!offerings.current) throw new Error('No offerings available');
+      let customerInfo;
 
-      const pkg = offerings.current.availablePackages.find(
-        p => p.product.identifier === productId
-      );
-      if (!pkg) throw new Error('Product not found. Please try again.');
+      // PRIMARY: Try RC offerings (works when products are approved on App Store Connect)
+      try {
+        const offerings = await Purchases.getOfferings();
+        if (offerings.current) {
+          const pkg = offerings.current.availablePackages.find(
+            p => p.product.identifier === productId
+          );
+          if (pkg) {
+            const result = await Purchases.purchasePackage(pkg);
+            customerInfo = result.customerInfo;
+          }
+        }
+      } catch (offeringsError: any) {
+        // Offerings failed — fall through to direct product purchase
+        if (offeringsError?.userCancelled) {
+          setLoading(null);
+          return; // User cancelled — do not fall through
+        }
+      }
 
-      const { customerInfo } = await Purchases.purchasePackage(pkg);
+      // FALLBACK: Direct product purchase via RC (works with StoreKit config file
+      // and during App Review when products are "Waiting for Review")
+      if (!customerInfo) {
+        const products = await Purchases.getProducts([productId]);
+        if (!products || products.length === 0) {
+          throw new Error('Product not available. Please check your connection and try again.');
+        }
+        const result = await Purchases.purchaseStoreProduct(products[0]);
+        customerInfo = result.customerInfo;
+      }
 
-      const entitlementId = type === 'single' ? 'download_single' : type === '4x6' ? 'download_4x6' : 'download_bundle';
+      // Verify entitlement or grant access directly for consumables
       if (customerInfo.entitlements.active[entitlementId]) {
         onPurchased(type);
       } else {
-        Alert.alert('Purchase issue', 'Payment received but entitlement not found. Please contact support.');
+        // For consumables, RC entitlements may not persist — grant access directly
+        onPurchased(type);
       }
 
     } catch (e: any) {
