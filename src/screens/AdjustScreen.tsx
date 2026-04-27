@@ -207,7 +207,10 @@ export default function AdjustScreen() {
         country,
       });
     } catch (e: any) {
-      Alert.alert('Error', e.message ?? 'Could not crop photo. Please try again.');
+      const msg = e?.message ?? 'Unknown error';
+      Alert.alert('Crop Error', 
+        `${msg}\n\ncropX:${Math.round((0-(OVW/2+transform.tx))/transform.scale+origW/2)} cropY:${Math.round((0-(OVH/2+transform.ty))/transform.scale+origH/2)} cropW:${Math.round(OVW/transform.scale)} origW:${origW} origH:${origH} scale:${transform.scale.toFixed(3)}`
+      );
     } finally {
       setConfirming(false);
     }
@@ -306,6 +309,11 @@ export default function AdjustScreen() {
             </TouchableOpacity>
             <View style={styles.zoomLabel}>
               <Text style={styles.zoomPct}>{zoomPct}%</Text>
+              {__DEV__ && (
+                <Text style={{fontSize:9, color:'#888', textAlign:'center'}}>
+                  {`cropW:${Math.round(OVW/transform.scale)} origW:${origW} scale:${transform.scale.toFixed(3)}`}
+                </Text>
+              )}
               <Text style={styles.zoomTitle}>Zoom</Text>
             </View>
             <TouchableOpacity style={styles.zoomBtn} onPress={() => zoom(-ZOOM_STEP)} activeOpacity={0.6}>

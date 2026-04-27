@@ -29,6 +29,15 @@ class PassportProcessor: NSObject {
 
     private let queue = DispatchQueue(label: "com.passportsnap.processor", qos: .userInitiated)
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    /// Pixel-accurate renderer format — scale=1.0 matches the old
+    /// UIGraphicsBeginImageContextWithOptions(size, opaque, 1.0) behaviour.
+    /// Without this, UIGraphicsImageRenderer defaults to screen scale (3×)
+    /// making all images 3× too large → wrong autoCrop coordinates → crash.
+    private var pixelFormat: UIGraphicsImageRendererFormat {
+        let f = UIGraphicsImageRendererFormat()
+        f.scale = 1.0
+        return f
+    }
     @objc static func requiresMainQueueSetup() -> Bool { false }
 
     // MARK: ── Country Specs ───────────────────────────────────────────────────
@@ -88,7 +97,7 @@ class PassportProcessor: NSObject {
         guard image.imageOrientation != .up else { return image }
         let sz = CGSize(width: image.size.width * image.scale,
                         height: image.size.height * image.scale)
-        let renderer = UIGraphicsImageRenderer(size: sz)
+        let renderer = UIGraphicsImageRenderer(size: sz, format: pixelFormat)
         return renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
     }
 
@@ -99,7 +108,7 @@ class PassportProcessor: NSObject {
         guard longer > maxDim else { return (image, 1.0) }
         let scale = maxDim / longer
         let sz = CGSize(width: (w * scale).rounded(), height: (h * scale).rounded())
-        let rendererDS = UIGraphicsImageRenderer(size: sz)
+        let rendererDS = UIGraphicsImageRenderer(size: sz, format: pixelFormat)
         let out = rendererDS.image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
         return (out, scale)
     }
@@ -130,7 +139,7 @@ class PassportProcessor: NSObject {
         let ow = Int(image.size.width * image.scale)
         let oh = Int(image.size.height * image.scale)
         let nw = ow + 2 * padX; let nh = oh + 2 * padY
-        let rendererPad = UIGraphicsImageRenderer(size: CGSize(width: nw, height: nh))
+        let rendererPad = UIGraphicsImageRenderer(size: CGSize(width: nw, height: nh), format: pixelFormat)
         let padded = rendererPad.image { ctx in
             UIColor.white.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: nw, height: nh))
@@ -148,7 +157,7 @@ class PassportProcessor: NSObject {
     }
 
     private func resizeImage(_ image: UIImage, toPixelSize size: CGSize) -> UIImage? {
-        let rendererResize = UIGraphicsImageRenderer(size: size)
+        let rendererResize = UIGraphicsImageRenderer(size: size, format: pixelFormat)
         return rendererResize.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
     }
 
@@ -172,7 +181,7 @@ class PassportProcessor: NSObject {
             cgImage = cg
         } else {
             // Force render to bitmap — handles HEIF, ProRAW, HDR formats from iPhone 17 Pro
-            let renderer = UIGraphicsImageRenderer(size: image.size)
+            let renderer = UIGraphicsImageRenderer(size: image.size, format: pixelFormat)
             let rendered = renderer.image { _ in image.draw(at: .zero) }
             guard let cg = rendered.cgImage else { return nil }
             cgImage = cg
@@ -536,7 +545,7 @@ class PassportProcessor: NSObject {
     private func addWatermark(_ image: UIImage) -> UIImage {
         let w = image.size.width * image.scale
         let h = image.size.height * image.scale
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: w, height: h))
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: pixelFormat)
         return renderer.image { ctx in
             image.draw(at: .zero)
             let fs = max(28, w/5) * 0.70
@@ -592,7 +601,7 @@ class PassportProcessor: NSObject {
         case "CAN":                         (pw,ph)=(591,827)
         default:                            (pw,ph)=(600,600)
         }
-        let sheetRenderer = UIGraphicsImageRenderer(size: CGSize(width: sW, height: sH))
+        let sheetRenderer = UIGraphicsImageRenderer(size: CGSize(width: sW, height: sH), format: pixelFormat)
         let sheetResult = sheetRenderer.image { ctx in
             UIColor.white.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: sW, height: sH))
@@ -776,10 +785,13 @@ class PassportProcessor: NSObject {
                     reject: @escaping RCTPromiseRejectBlock) {
         queue.async {
             do {
+                NSLog("[PassportSnap] crop() start: cropX=%d cropY=%d cropW=%d cropH=%d outW=%d outH=%d", cropX, cropY, cropW, cropH, outW, outH)
                 guard let data = Data(base64Encoded: imageBase64),
                       let src = UIImage(data: data) else {
+                    NSLog("[PassportSnap] crop() FAILED: Decode failed")
                     throw NSError(domain:"PP", code:20, userInfo:[NSLocalizedDescriptionKey:"Decode failed"])
                 }
+                NSLog("[PassportSnap] crop() src size: %.0f×%.0f scale=%.1f", src.size.width, src.size.height, src.scale)
 
                 let pad = max(outW, max(outH, max(abs(cropX), abs(cropY))))
                 let (padded, pw, ph) = self.padImage(src, padX: pad, padY: pad)
@@ -818,6 +830,7 @@ class PassportProcessor: NSObject {
                 }
                 let wmData = self.addWatermark(cropped).jpegData(compressionQuality: 0.92) ?? cleanData
 
+                NSLog("[PassportSnap] crop() SUCCESS: outW=%d outH=%d cleanSize=%d", outW, outH, cleanData.count)
                 resolve([
                     "imageBase64":        wmData.base64EncodedString(),
                     "cleanBase64":        cleanData.base64EncodedString(),
