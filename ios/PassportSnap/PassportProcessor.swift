@@ -789,11 +789,14 @@ class PassportProcessor: NSObject {
                     throw NSError(domain:"PP", code:20, userInfo:[NSLocalizedDescriptionKey:"Decode failed"])
                 }
 
-                let pad = max(outW, max(outH, max(abs(cropX), abs(cropY))))
-                let (padded, pw, ph) = self.padImage(src, padX: pad, padY: pad)
+                // src is already pre-padded by prepare() with bmpW/2 margins.
+                // Do NOT re-pad here — that creates a double-padded 8000×8000+ image → OOM crash.
+                // Instead just use src directly; cropX/cropY are in pre-padded coordinates.
+                let pw = Int(src.size.width  * src.scale)
+                let ph = Int(src.size.height * src.scale)
 
-                let cx = min(max(cropX+pad, 0), pw-1)
-                let cy = min(max(cropY+pad, 0), ph-1)
+                let cx = min(max(cropX, 0), pw-1)
+                let cy = min(max(cropY, 0), ph-1)
                 // Derive ch from cw using the EXACT output aspect ratio.
                 // Independent min() clamping of cw and ch can produce different ratios
                 // → the final resize to outW×outH would then stretch the image.
@@ -812,7 +815,7 @@ class PassportProcessor: NSObject {
                     throw NSError(domain:"PP", code:21, userInfo:[NSLocalizedDescriptionKey:"Invalid crop"])
                 }
 
-                guard var cropped = self.cropImage(padded, to: CGRect(x:cx,y:cy,width:cw,height:ch)),
+                guard var cropped = self.cropImage(src,    to: CGRect(x:cx,y:cy,width:cw,height:ch)),
                       let resized = self.resizeImage(cropped, toPixelSize: CGSize(width:outW,height:outH))
                 else {
                     throw NSError(domain:"PP", code:22, userInfo:[NSLocalizedDescriptionKey:"Crop failed"])
