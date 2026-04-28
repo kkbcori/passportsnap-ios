@@ -76,15 +76,31 @@ export default function PreviewScreen() {
 
   const save2x2 = () => { setPurchaseType('single'); setShowPaywall(true); };
 
+  // Request photo library permission on iOS before saving
+  const requestPhotoPermission = async (): Promise<boolean> => {
+    try {
+      const { PermissionsAndroid, Platform } = require('react-native');
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      }
+      // iOS: CameraRoll handles permission prompt automatically
+      return true;
+    } catch { return true; }
+  };
+
   const doSave2x2 = async (clean: string) => {
     try {
       setSaving2x2(true);
       const path = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
       await RNFS.writeFile(path, clean, 'base64');
+      await new Promise(resolve => setTimeout(resolve, 500));
       await CameraRoll.save(`file://${path}`, { type: 'photo' });
-      Alert.alert('Saved! ✓', 'Clean passport photo saved to gallery.');
+      Alert.alert('Saved! ✓', 'Passport photo saved to your gallery.');
     } catch (e: any) {
-      Alert.alert('Error', e.message ?? 'Could not save.');
+      Alert.alert('Save failed', 'Could not save to gallery. Please go to Settings → PassportSnap → Photos and allow access, then try again.');
     } finally { setSaving2x2(false); }
   };
 
@@ -99,8 +115,9 @@ export default function PreviewScreen() {
 
       const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
       await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
+      await new Promise(resolve => setTimeout(resolve, 500));
       await CameraRoll.save(`file://${sheetPath}`, { type: 'photo' });
-      Alert.alert('Saved!', '4x6 print sheet saved to gallery.');
+      Alert.alert('Saved! ✓', '4×6 print sheet saved to your gallery.');
     } catch (e: any) {
       Alert.alert('Error', e.message ?? 'Could not create 4x6 sheet.');
     } finally { setSaving4x6(false); }
@@ -112,12 +129,14 @@ export default function PreviewScreen() {
       // Save single photo
       const singlePath = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
       await RNFS.writeFile(singlePath, photoData, 'base64');
+      await new Promise(resolve => setTimeout(resolve, 500));
       await CameraRoll.save(`file://${singlePath}`, { type: 'photo' });
 
       // Save 4x6 sheet
       const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
       const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
       await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
+      await new Promise(resolve => setTimeout(resolve, 500));
       await CameraRoll.save(`file://${sheetPath}`, { type: 'photo' });
 
       Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
@@ -136,7 +155,9 @@ export default function PreviewScreen() {
           {
             text: 'Rate us ★★★★★',
             onPress: () => {
-              const storeUrl = 'https://play.google.com/store/apps/details?id=com.passportsnap';
+              const storeUrl = Platform.OS === 'ios'
+                ? 'itms-apps://itunes.apple.com/app/id6760956080?action=write-review'
+                : 'https://play.google.com/store/apps/details?id=com.passportsnap&showAllReviews=true';
               Linking.openURL(storeUrl).catch(() => {});
             },
           },
@@ -307,7 +328,8 @@ export default function PreviewScreen() {
           if (type === 'single') { await doSave2x2(photoData); }
           else if (type === 'bundle') { await saveBundle(photoData); }
           else { await save4x6(photoData); }
-          askForReview();
+          // Delay review prompt so the "Saved!" alert is dismissed first
+          setTimeout(() => askForReview(), 3500);
         }}
       />
     </SafeAreaView>
