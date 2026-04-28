@@ -174,7 +174,8 @@ class PassportProcessor: NSObject {
             cgImage = cg
         } else {
             // Force render to bitmap — handles HEIF, ProRAW, HDR formats from iPhone 17 Pro
-            let renderer = UIGraphicsImageRenderer(size: image.size)
+            let fmt = UIGraphicsImageRendererFormat(); fmt.scale = 1.0
+            let renderer = UIGraphicsImageRenderer(size: image.size, format: fmt)
             let rendered = renderer.image { _ in image.draw(at: .zero) }
             guard let cg = rendered.cgImage else { return nil }
             cgImage = cg
@@ -268,13 +269,16 @@ class PassportProcessor: NSObject {
         let sY = inputCI.extent.height / maskCI.extent.height
         maskCI = maskCI.transformed(by: CGAffineTransform(scaleX: sX, y: sY))
         let white = CIImage(color: CIColor.white).cropped(to: inputCI.extent)
-        guard let blend  = CIFilter(name: "CIBlendWithMask"),
-              let _      = { blend.setValue(inputCI, forKey:"inputImage");
-                             blend.setValue(white,   forKey:"inputBackgroundImage");
-                             blend.setValue(maskCI,  forKey:"inputMaskImage") }(),
-              let outCI  = blend.outputImage,
-              let cg     = ciContext.createCGImage(outCI, from: outCI.extent)
-        else { return toneCurveFallback(image: image) }
+        guard let blend = CIFilter(name: "CIBlendWithMask") else {
+            return toneCurveFallback(image: image)
+        }
+        blend.setValue(inputCI, forKey: "inputImage")
+        blend.setValue(white,   forKey: "inputBackgroundImage")
+        blend.setValue(maskCI,  forKey: "inputMaskImage")
+        guard let outCI = blend.outputImage,
+              let cg    = ciContext.createCGImage(outCI, from: outCI.extent) else {
+            return toneCurveFallback(image: image)
+        }
         return UIImage(cgImage: cg)
     }
     // MARK: ── Tone Curve Fallback (iOS 14) ───────────────────────────────────
