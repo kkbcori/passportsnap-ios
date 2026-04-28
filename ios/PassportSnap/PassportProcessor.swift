@@ -91,8 +91,7 @@ class PassportProcessor: NSObject {
         guard image.imageOrientation != .up else { return image }
         let sz = CGSize(width: image.size.width * image.scale,
                         height: image.size.height * image.scale)
-        return UIGraphicsImageRenderer(size: sz, format: pixelFormat)
-            .image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
+        return UIGraphicsImageRenderer(size: sz, format: pixelFormat).image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
     }
 
     private func downscale(_ image: UIImage, maxDim: CGFloat) -> (UIImage, CGFloat) {
@@ -102,8 +101,7 @@ class PassportProcessor: NSObject {
         guard longer > maxDim else { return (image, 1.0) }
         let scale = maxDim / longer
         let sz = CGSize(width: (w * scale).rounded(), height: (h * scale).rounded())
-        let out = UIGraphicsImageRenderer(size: sz, format: pixelFormat)
-            .image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
+        let out = UIGraphicsImageRenderer(size: sz, format: pixelFormat).image { _ in image.draw(in: CGRect(origin: .zero, size: sz)) }
         return (out, scale)
     }
 
@@ -133,11 +131,10 @@ class PassportProcessor: NSObject {
         let ow = Int(image.size.width * image.scale)
         let oh = Int(image.size.height * image.scale)
         let nw = ow + 2 * padX; let nh = oh + 2 * padY
-        let padded = UIGraphicsImageRenderer(size: CGSize(width: nw, height: nh), format: pixelFormat)
-            .image { ctx in
-                UIColor.white.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: nw, height: nh))
-                image.draw(at: CGPoint(x: padX, y: padY))
-            }
+        let padded = UIGraphicsImageRenderer(size: CGSize(width: nw, height: nh), format: pixelFormat).image { ctx in
+            UIColor.white.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: nw, height: nh))
+            image.draw(at: CGPoint(x: padX, y: padY))
+        }
         return (padded, nw, nh)
     }
 
@@ -150,8 +147,7 @@ class PassportProcessor: NSObject {
     }
 
     private func resizeImage(_ image: UIImage, toPixelSize size: CGSize) -> UIImage? {
-        return UIGraphicsImageRenderer(size: size, format: pixelFormat)
-            .image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+        return UIGraphicsImageRenderer(size: size, format: pixelFormat).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
     }
 
     // MARK: ── Face Detection (Vision) ────────────────────────────────────────
@@ -250,9 +246,9 @@ class PassportProcessor: NSObject {
 
     @available(iOS 15.0, *)
     private func segmentationRemoval(image: UIImage) -> UIImage {
-        // Pure CIImage pipeline — eliminates BFS [Float]/[Bool] arrays
-        // that caused ~3GB peak memory → Jetsam per-process-limit OOM kill.
         let inputCI = CIImage(image: image) ?? CIImage(cgImage: image.cgImage!)
+
+        // ── 1. Run person segmentation ────────────────────────────────────────
         var maskBuffer: CVPixelBuffer?
         let sem = DispatchSemaphore(value: 0)
         let request = VNGeneratePersonSegmentationRequest { req, _ in
@@ -261,26 +257,108 @@ class PassportProcessor: NSObject {
             maskBuffer = obs.pixelBuffer
         }
         request.qualityLevel = .accurate
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent32Float
         try? VNImageRequestHandler(ciImage: inputCI, options: [:]).perform([request])
         sem.wait()
+
         guard let buf = maskBuffer else { return toneCurveFallback(image: image) }
-        var maskCI = CIImage(cvPixelBuffer: buf)
-        let sX = inputCI.extent.width  / maskCI.extent.width
-        let sY = inputCI.extent.height / maskCI.extent.height
+
+        // ── 2. Read mask pixels from CVPixelBuffer ────────────────────────────
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        let mW  = CVPixelBufferGetWidth(buf)
+        let mH  = CVPixelBufferGetHeight(buf)
+        guard let base = CVPixelBufferGetBaseAddress(buf), mW > 0, mH > 0 else {
+            return toneCurveFallback(image: image)
+        }
+        let ptr = base.assumingMemoryBound(to: Float32.self)
+        let fpr = CVPixelBufferGetBytesPerRow(buf) / MemoryLayout<Float32>.size
+        // Copy into flat array (row-stride may differ from width)
+        var rawMask = [Float](repeating: 0, count: mW * mH)
+        for row in 0..<mH {
+            for col in 0..<mW {
+                rawMask[row * mW + col] = ptr[row * fpr + col]
+            }
+        }
+
+        // ── 3. BFS from borders — only remove CONNECTED background ───────────
+        // Background pixels (mask < 0.5) reachable from any image border get
+        // marked as "remove". Background pixels enclosed inside the person
+        // (collar shadows, dark fabric folds) are NOT reachable from the border
+        // → they stay as person = 1.0 in the output mask.
+        var finalMask = [Float](repeating: 1.0, count: mW * mH)  // default: person
+        var visited   = [Bool](repeating: false, count: mW * mH)
+        var queue     = [Int]()
+        queue.reserveCapacity(mW * 2 + mH * 2)
+
+        func tryEnqueue(_ idx: Int) {
+            guard idx >= 0, idx < rawMask.count,
+                  !visited[idx], rawMask[idx] < 0.5 else { return }
+            visited[idx]   = true
+            finalMask[idx] = 0.0   // background — remove
+            queue.append(idx)
+        }
+
+        // Seed all 4 borders
+        for x in 0..<mW { tryEnqueue(x); tryEnqueue((mH-1)*mW + x) }
+        for y in 1..<(mH-1) { tryEnqueue(y*mW); tryEnqueue(y*mW + mW-1) }
+
+        // BFS — 4-connected
+        var qi = 0
+        while qi < queue.count {
+            let idx = queue[qi]; qi += 1
+            let x = idx % mW; let y = idx / mW
+            if x > 0    { tryEnqueue(idx - 1)  }
+            if x < mW-1 { tryEnqueue(idx + 1)  }
+            if y > 0    { tryEnqueue(idx - mW) }
+            if y < mH-1 { tryEnqueue(idx + mW) }
+        }
+        // finalMask: 1.0 = person (keep), 0.0 = border-connected background (remove)
+        // Interior dark holes (collar shadow etc.) = 1.0 → kept as person ✓
+
+        // ── 4. Build CIImage from final mask ──────────────────────────────────
+        // Allocate a new CVPixelBuffer for the cleaned mask
+        var cleanBuf: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, mW, mH,
+                            kCVPixelFormatType_OneComponent32Float,
+                            [kCVPixelBufferCGImageCompatibilityKey: true,
+                             kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary,
+                            &cleanBuf)
+        guard let cb = cleanBuf else { return toneCurveFallback(image: image) }
+
+        CVPixelBufferLockBaseAddress(cb, [])
+        let cbPtr  = CVPixelBufferGetBaseAddress(cb)!.assumingMemoryBound(to: Float32.self)
+        let cbFpr  = CVPixelBufferGetBytesPerRow(cb) / MemoryLayout<Float32>.size
+        for row in 0..<mH {
+            for col in 0..<mW {
+                cbPtr[row * cbFpr + col] = finalMask[row * mW + col]
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(cb, [])
+
+        var maskCI = CIImage(cvPixelBuffer: cb)
+
+        // Scale mask to match input image size
+        let inputW = inputCI.extent.width; let inputH = inputCI.extent.height
+        let sX = inputW / maskCI.extent.width; let sY = inputH / maskCI.extent.height
         maskCI = maskCI.transformed(by: CGAffineTransform(scaleX: sX, y: sY))
+
+        // ── 5. Composite: person over white ───────────────────────────────────
         let white = CIImage(color: CIColor.white).cropped(to: inputCI.extent)
-        guard let blend = CIFilter(name: "CIBlendWithMask") else {
+        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
             return toneCurveFallback(image: image)
         }
-        blend.setValue(inputCI, forKey: "inputImage")
-        blend.setValue(white,   forKey: "inputBackgroundImage")
-        blend.setValue(maskCI,  forKey: "inputMaskImage")
-        guard let outCI = blend.outputImage,
-              let cg    = ciContext.createCGImage(outCI, from: outCI.extent) else {
+        blendFilter.setValue(inputCI, forKey: "inputImage")
+        blendFilter.setValue(white,   forKey: "inputBackgroundImage")
+        blendFilter.setValue(maskCI,  forKey: "inputMaskImage")
+
+        guard let outputCI = blendFilter.outputImage,
+              let cgOut = ciContext.createCGImage(outputCI, from: outputCI.extent) else {
             return toneCurveFallback(image: image)
         }
-        return UIImage(cgImage: cg)
+        return UIImage(cgImage: cgOut)
     }
+
     // MARK: ── Tone Curve Fallback (iOS 14) ───────────────────────────────────
 
     private func toneCurveFallback(image: UIImage) -> UIImage {
@@ -457,22 +535,21 @@ class PassportProcessor: NSObject {
     private func addWatermark(_ image: UIImage) -> UIImage {
         let w = image.size.width * image.scale
         let h = image.size.height * image.scale
-        return UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: pixelFormat)
-            .image { ctx in
-                image.draw(at: .zero)
-                let fs = max(28, w/5) * 0.70
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.boldSystemFont(ofSize: fs),
-                    .foregroundColor: UIColor(white: 0.55, alpha: 0.35),
-                ]
-                let text = "PassportSnap" as NSString
-                let ts = text.size(withAttributes: attrs)
-                let cg = ctx.cgContext
-                cg.saveGState()
-                cg.translateBy(x: w/2, y: h/2); cg.rotate(by: -30 * .pi / 180)
-                text.draw(at: CGPoint(x: -ts.width/2, y: -ts.height/2), withAttributes: attrs)
-                cg.restoreGState()
-            }
+        return UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: pixelFormat).image { ctx in
+            image.draw(at: .zero)
+            let fs = max(28, w/5) * 0.70
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: fs),
+                .foregroundColor: UIColor(white: 0.55, alpha: 0.35),
+            ]
+            let text = "PassportSnap" as NSString
+            let ts = text.size(withAttributes: attrs)
+            let cg = ctx.cgContext
+            cg.saveGState()
+            cg.translateBy(x: w/2, y: h/2); cg.rotate(by: -30 * .pi / 180)
+            text.draw(at: CGPoint(x: -ts.width/2, y: -ts.height/2), withAttributes: attrs)
+            cg.restoreGState()
+        }
     }
 
     /// En1: subtle 1–2% saturation/vibrance boost to make face colours more vivid.
@@ -513,19 +590,18 @@ class PassportProcessor: NSObject {
         case "CAN":                         (pw,ph)=(591,827)
         default:                            (pw,ph)=(600,600)
         }
-        let sheetImg = UIGraphicsImageRenderer(size: CGSize(width: sW, height: sH), format: pixelFormat)
-            .image { ctx in
-                UIColor.white.setFill(); ctx.fill(CGRect(x:0,y:0,width:sW,height:sH))
-                let slotW=pw+2*border, slotH=ph+2*border
-                let startX=(sW-slotW)/2, gap: CGFloat=40
-                let startY=(sH-(2*slotH+gap))/2
-                UIColor.black.setStroke()
-                for i in 0...1 {
-                    let sy=startY+CGFloat(i)*(slotH+gap)
-                    photo.draw(in: CGRect(x:startX+border, y:sy+border, width:pw, height:ph))
-                    UIBezierPath(rect: CGRect(x:startX, y:sy, width:slotW, height:slotH)).stroke()
-                }
+        let sheetImg = UIGraphicsImageRenderer(size: CGSize(width: sW, height: sH), format: pixelFormat).image { ctx in
+            UIColor.white.setFill(); ctx.fill(CGRect(x:0,y:0,width:sW,height:sH))
+            let slotW=pw+2*border, slotH=ph+2*border
+            let startX=(sW-slotW)/2, gap: CGFloat=40
+            let startY=(sH-(2*slotH+gap))/2
+            UIColor.black.setStroke()
+            for i in 0...1 {
+                let sy=startY+CGFloat(i)*(slotH+gap)
+                photo.draw(in: CGRect(x:startX+border, y:sy+border, width:pw, height:ph))
+                UIBezierPath(rect: CGRect(x:startX, y:sy, width:slotW, height:slotH)).stroke()
             }
+        }
         return sheetImg
     }
 
@@ -562,7 +638,7 @@ class PassportProcessor: NSObject {
                 let origFh     = faceOpt.map { Int(CGFloat($0.fh)      * inv) } ?? 0
 
                 // 4. Downscale to ≤2000px for processing
-                let (procBmp2, procScale2) = self.downscale(bmp, maxDim: 1200)
+                let (procBmp2, procScale2) = self.downscale(bmp, maxDim: 2000)
                 let ps2 = Double(procScale2)
                 if procScale2 < 1.0 { bmp = procBmp2 }
                 let scaledCx = Int(Double(origFaceCx) * ps2)
@@ -701,7 +777,7 @@ class PassportProcessor: NSObject {
                     throw NSError(domain:"PP", code:20, userInfo:[NSLocalizedDescriptionKey:"Decode failed"])
                 }
 
-                // src is pre-padded by prepare() — do NOT pad again
+                // src already pre-padded by prepare() — no re-padding needed
                 let pw = Int(src.size.width)
                 let ph = Int(src.size.height)
                 let cx = min(max(cropX, 0), pw-1)
