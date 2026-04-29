@@ -94,6 +94,12 @@ export default function PreviewScreen() {
   const doSave2x2 = async (clean: string) => {
     try {
       setSaving2x2(true);
+      // Request photo permission explicitly before saving (fixes "Unknown error from native module" on first save)
+      const { status } = await CameraRoll.requestSavePermission();
+      if (status === 'denied') {
+        Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
+        return;
+      }
       const path = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
       await RNFS.writeFile(path, clean, 'base64');
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -109,6 +115,13 @@ export default function PreviewScreen() {
     if (!photoData) { Alert.alert('Error', 'Photo data missing.'); return; }
     try {
       setSaving4x6(true);
+
+      // Request photo permission explicitly before saving (fixes "Unknown error from native module" on first save)
+      const { status } = await CameraRoll.requestSavePermission();
+      if (status === 'denied') {
+        Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
+        return;
+      }
 
       // Call native module instead of HTTP API
       const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
@@ -126,6 +139,15 @@ export default function PreviewScreen() {
   const saveBundle = async (photoData: string) => {
     try {
       setSavingBundle(true);
+      // Request photo permission ONCE up-front — gates both the single-photo save and the 4x6 save.
+      // This is the key fix for "bundle only downloads 1 photo": without an explicit grant before
+      // the first save, iOS sometimes silently fails the second CameraRoll.save() call.
+      const { status } = await CameraRoll.requestSavePermission();
+      if (status === 'denied') {
+        Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
+        return;
+      }
+
       // Save single photo
       const singlePath = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
       await RNFS.writeFile(singlePath, photoData, 'base64');
