@@ -108,6 +108,27 @@ export default function PreviewScreen() {
     return true;
   };
 
+  // Save to camera roll with one automatic retry on native errors.
+  // First-time saves on iOS sometimes throw "unknown error on native" because
+  // PHPhotoLibrary is still settling after the permission grant of a previous save,
+  // and back-to-back writes (2x2 then 4x6) hit a transient error window.
+  // Retrying once after a longer delay clears it virtually every time.
+  const saveToGalleryWithRetry = async (uri: string): Promise<void> => {
+    try {
+      await CameraRoll.save(uri, { type: 'photo' });
+    } catch (firstErr: any) {
+      // Wait for PHPhotoLibrary to settle, then retry once.
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        await CameraRoll.save(uri, { type: 'photo' });
+      } catch (secondErr: any) {
+        // Surface a useful message — include both attempts for diagnostics.
+        const msg = secondErr?.message ?? firstErr?.message ?? 'unknown error';
+        throw new Error(`CameraRoll.save failed after retry: ${msg}`);
+      }
+    }
+  };
+
   const doSave2x2 = async (clean: string) => {
     try {
       setSaving2x2(true);
@@ -120,7 +141,7 @@ export default function PreviewScreen() {
       const path = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
       await RNFS.writeFile(path, clean, 'base64');
       await new Promise(resolve => setTimeout(resolve, 500));
-      await CameraRoll.save(`file://${path}`, { type: 'photo' });
+      await saveToGalleryWithRetry(`file://${path}`);
       Alert.alert('Saved! ✓', 'Passport photo saved to your gallery.');
     } catch (e: any) {
       Alert.alert('Save failed', 'Could not save to gallery. Please go to Settings → PassportSnap → Photos and allow access, then try again.');
@@ -146,7 +167,7 @@ export default function PreviewScreen() {
       const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
       await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
       await new Promise(resolve => setTimeout(resolve, 500));
-      await CameraRoll.save(`file://${sheetPath}`, { type: 'photo' });
+      await saveToGalleryWithRetry(`file://${sheetPath}`);
       Alert.alert('Saved! ✓', '4×6 print sheet saved to your gallery.');
     } catch (e: any) {
       Alert.alert('Error', e.message ?? 'Could not create 4x6 sheet.');
@@ -156,31 +177,71 @@ export default function PreviewScreen() {
   const saveBundle = async (photoData: string) => {
     try {
       setSavingBundle(true);
-      // Defensive permission check ONCE up-front — gates both the single-photo save and the 4x6 save.
-      // This fixes "bundle only downloads 1 photo": without an explicit grant before
-      // the first save, iOS sometimes silently fails the second CameraRoll.save() call.
+      // Defensive permission check ONCE up-front — gates both saves.
       const ok = await requestPhotoPermission();
       if (!ok) {
         Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
         return;
       }
 
-      // Save single photo
+      // -- Step 1: save the single 2x2 photo --
       const singlePath = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
-      await RNFS.writeFile(singlePath, photoData, 'base64');
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await CameraRoll.save(`file://${singlePath}`, { type: 'photo' });
+      try {
+        await RNFS.writeFile(singlePath, photoData, 'base64');
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await saveToGalleryWithRetry(`file://${singlePath}`);
+      } catch (e: any) {
+        Alert.alert('Error saving 2×2', e?.message ?? 'Could not save the single photo.');
+        return;
+      }
 
-      // Save 4x6 sheet
-      const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
-      const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
-      await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await CameraRoll.save(`file://${sheetPath}`, { type: 'photo' });
+      // -- Step 2: get the 4x6 sheet path. Reuse the preview file if it was already
+      // generated on mount — avoids running PassportProcessor.makeSheet4x6 twice
+      // (which can OOM on iOS after the first PHPhotoLibrary write tightens memory). --
+      let sheetPath: string;
+      try {
+        if (preview4x6Uri) {
+          // preview4x6Uri is "file:///..."; strip the prefix for RNFS.exists check
+          const previewLocalPath = preview4x6Uri.replace(/^file:\/\//, '');
+          const exists = await RNFS.exists(previewLocalPath);
+          if (exists) {
+            sheetPath = previewLocalPath;
+          } else {
+            // Cache evicted — fall back to regenerating
+            const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
+            sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
+            await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
+          }
+        } else {
+          // Preview wasn't ready (user hit Buy faster than the mount-time generation)
+          const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
+          sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
+          await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
+        }
+      } catch (e: any) {
+        Alert.alert(
+          '2×2 saved, 4×6 failed',
+          `Single photo saved, but generating the 4×6 sheet failed: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
+        );
+        return;
+      }
+
+      // -- Step 3: save the 4x6 sheet. Longer delay between bundle saves because
+      // iOS PHPhotoLibrary needs more settle time after the first save on cold start. --
+      try {
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        await saveToGalleryWithRetry(`file://${sheetPath}`);
+      } catch (e: any) {
+        Alert.alert(
+          '2×2 saved, 4×6 failed',
+          `Single photo saved, but the 4×6 sheet couldn't be written to your gallery: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
+        );
+        return;
+      }
 
       Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
     } catch (e: any) {
-      Alert.alert('Error', e.message ?? 'Could not save bundle.');
+      Alert.alert('Error', e?.message ?? 'Could not save bundle.');
     } finally { setSavingBundle(false); }
   };
 
