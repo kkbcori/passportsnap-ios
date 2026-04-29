@@ -129,6 +129,29 @@ export default function PreviewScreen() {
     }
   };
 
+  // Write base64 to a temp file and verify it exists with non-zero size before returning.
+  // Uses DocumentDirectoryPath instead of CachesDirectoryPath because PHPhotoLibrary
+  // on newer iOS versions can fail with "Unknown error from a native module" when
+  // ingesting from cache paths that the system has flagged as evictable mid-write.
+  // Also catches the silent failure where RNFS.writeFile resolves but the file
+  // isn't actually flushed to disk yet.
+  const writeAndVerify = async (filename: string, base64Data: string): Promise<string> => {
+    const path = `${RNFS.DocumentDirectoryPath}/${filename}`;
+    await RNFS.writeFile(path, base64Data, 'base64');
+    // Settle for fsync, then verify
+    await new Promise(r => setTimeout(r, 200));
+    const exists = await RNFS.exists(path);
+    if (!exists) {
+      throw new Error(`File write failed — ${filename} does not exist after write`);
+    }
+    const stat = await RNFS.stat(path);
+    const size = typeof stat.size === 'string' ? parseInt(stat.size, 10) : stat.size;
+    if (!size || size < 100) {
+      throw new Error(`File write produced empty/tiny file (${size} bytes)`);
+    }
+    return path;
+  };
+
   const doSave2x2 = async (clean: string) => {
     try {
       setSaving2x2(true);
@@ -138,10 +161,10 @@ export default function PreviewScreen() {
         Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
         return;
       }
-      const path = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
-      await RNFS.writeFile(path, clean, 'base64');
-      await new Promise(resolve => setTimeout(resolve, 500));
+      const path = await writeAndVerify(`passport_${Date.now()}.jpg`, clean);
       await saveToGalleryWithRetry(`file://${path}`);
+      // Clean up after save
+      try { await RNFS.unlink(path); } catch {}
       Alert.alert('Saved! ✓', 'Passport photo saved to your gallery.');
     } catch (e: any) {
       Alert.alert('Save failed', 'Could not save to gallery. Please go to Settings → PassportSnap → Photos and allow access, then try again.');
@@ -164,10 +187,9 @@ export default function PreviewScreen() {
       // Call native module instead of HTTP API
       const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
 
-      const sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
-      await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
-      await new Promise(resolve => setTimeout(resolve, 500));
+      const sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
       await saveToGalleryWithRetry(`file://${sheetPath}`);
+      try { await RNFS.unlink(sheetPath); } catch {}
       Alert.alert('Saved! ✓', '4×6 print sheet saved to your gallery.');
     } catch (e: any) {
       Alert.alert('Error', e.message ?? 'Could not create 4x6 sheet.');
@@ -185,40 +207,27 @@ export default function PreviewScreen() {
       }
 
       // -- Step 1: save the single 2x2 photo --
-      const singlePath = `${RNFS.CachesDirectoryPath}/passport_${Date.now()}.jpg`;
+      let singlePath: string;
       try {
-        await RNFS.writeFile(singlePath, photoData, 'base64');
-        await new Promise(resolve => setTimeout(resolve, 500));
+        singlePath = await writeAndVerify(`passport_${Date.now()}.jpg`, photoData);
         await saveToGalleryWithRetry(`file://${singlePath}`);
       } catch (e: any) {
         Alert.alert('Error saving 2×2', e?.message ?? 'Could not save the single photo.');
         return;
       }
 
-      // -- Step 2: get the 4x6 sheet path. Reuse the preview file if it was already
-      // generated on mount — avoids running PassportProcessor.makeSheet4x6 twice
-      // (which can OOM on iOS after the first PHPhotoLibrary write tightens memory). --
+      // -- Step 2: generate the 4x6 sheet fresh via the same path standalone save4x6 uses.
+      // We do NOT reuse the preview4x6Uri file here — that file is generated on mount with
+      // best-effort error handling and has been observed to occasionally be wrong/stale on iOS,
+      // producing a single-photo file instead of a real sheet. Regenerating costs ~1s but
+      // guarantees the user gets the same correct output as the standalone 4x6 download. --
       let sheetPath: string;
       try {
-        if (preview4x6Uri) {
-          // preview4x6Uri is "file:///..."; strip the prefix for RNFS.exists check
-          const previewLocalPath = preview4x6Uri.replace(/^file:\/\//, '');
-          const exists = await RNFS.exists(previewLocalPath);
-          if (exists) {
-            sheetPath = previewLocalPath;
-          } else {
-            // Cache evicted — fall back to regenerating
-            const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
-            sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
-            await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
-          }
-        } else {
-          // Preview wasn't ready (user hit Buy faster than the mount-time generation)
-          const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
-          sheetPath = `${RNFS.CachesDirectoryPath}/passport_4x6_${Date.now()}.jpg`;
-          await RNFS.writeFile(sheetPath, data.imageBase64, 'base64');
-        }
+        const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
+        sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
       } catch (e: any) {
+        // 2x2 already saved; clean up its temp file before bailing
+        try { await RNFS.unlink(singlePath); } catch {}
         Alert.alert(
           '2×2 saved, 4×6 failed',
           `Single photo saved, but generating the 4×6 sheet failed: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
@@ -232,12 +241,18 @@ export default function PreviewScreen() {
         await new Promise(resolve => setTimeout(resolve, 1200));
         await saveToGalleryWithRetry(`file://${sheetPath}`);
       } catch (e: any) {
+        try { await RNFS.unlink(singlePath); } catch {}
+        try { await RNFS.unlink(sheetPath); } catch {}
         Alert.alert(
           '2×2 saved, 4×6 failed',
           `Single photo saved, but the 4×6 sheet couldn't be written to your gallery: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
         );
         return;
       }
+
+      // Clean up both temp files after successful saves
+      try { await RNFS.unlink(singlePath); } catch {}
+      try { await RNFS.unlink(sheetPath); } catch {}
 
       Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
     } catch (e: any) {
