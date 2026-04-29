@@ -76,27 +76,44 @@ export default function PreviewScreen() {
 
   const save2x2 = () => { setPurchaseType('single'); setShowPaywall(true); };
 
-  // Request photo library permission on iOS before saving
+  // Cross-version, cross-platform photo-library permission check.
+  // Different @react-native-camera-roll/camera-roll versions expose different APIs:
+  //   - v6.x        : CameraRoll.requestSavePermission()
+  //   - newer v7.x  : CameraRoll.iosRequestReadWriteGalleryPermission() (iOS only)
+  //   - some builds : neither — rely on the system prompt fired by CameraRoll.save()
+  // This helper feature-detects what's available so we never crash with
+  // "undefined is not a function". Returns true if the save should proceed.
   const requestPhotoPermission = async (): Promise<boolean> => {
     try {
-      const { PermissionsAndroid, Platform } = require('react-native');
+      const cr: any = CameraRoll;
+      if (typeof cr.requestSavePermission === 'function') {
+        const { status } = await cr.requestSavePermission();
+        return status !== 'denied';
+      }
+      if (Platform.OS === 'ios' && typeof cr.iosRequestReadWriteGalleryPermission === 'function') {
+        const status = await cr.iosRequestReadWriteGalleryPermission();
+        return status !== 'denied' && status !== 'restricted';
+      }
       if (Platform.OS === 'android') {
+        const { PermissionsAndroid } = require('react-native');
         const granted = await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
         );
         return granted === PermissionsAndroid.RESULTS.GRANTED;
       }
-      // iOS: CameraRoll handles permission prompt automatically
-      return true;
-    } catch { return true; }
+    } catch {
+      // Fall through — don't block the save on a permission-API error.
+    }
+    // No explicit API available; let CameraRoll.save trigger the system prompt itself.
+    return true;
   };
 
   const doSave2x2 = async (clean: string) => {
     try {
       setSaving2x2(true);
-      // Request photo permission explicitly before saving (fixes "Unknown error from native module" on first save)
-      const { status } = await CameraRoll.requestSavePermission();
-      if (status === 'denied') {
+      // Defensive permission check (handles CameraRoll API differences across versions)
+      const ok = await requestPhotoPermission();
+      if (!ok) {
         Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
         return;
       }
@@ -116,9 +133,9 @@ export default function PreviewScreen() {
     try {
       setSaving4x6(true);
 
-      // Request photo permission explicitly before saving (fixes "Unknown error from native module" on first save)
-      const { status } = await CameraRoll.requestSavePermission();
-      if (status === 'denied') {
+      // Defensive permission check (handles CameraRoll API differences across versions)
+      const ok = await requestPhotoPermission();
+      if (!ok) {
         Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
         return;
       }
@@ -139,11 +156,11 @@ export default function PreviewScreen() {
   const saveBundle = async (photoData: string) => {
     try {
       setSavingBundle(true);
-      // Request photo permission ONCE up-front — gates both the single-photo save and the 4x6 save.
-      // This is the key fix for "bundle only downloads 1 photo": without an explicit grant before
+      // Defensive permission check ONCE up-front — gates both the single-photo save and the 4x6 save.
+      // This fixes "bundle only downloads 1 photo": without an explicit grant before
       // the first save, iOS sometimes silently fails the second CameraRoll.save() call.
-      const { status } = await CameraRoll.requestSavePermission();
-      if (status === 'denied') {
+      const ok = await requestPhotoPermission();
+      if (!ok) {
         Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
         return;
       }
