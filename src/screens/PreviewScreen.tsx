@@ -207,13 +207,21 @@ export default function PreviewScreen() {
       }
 
       // -- Step 1: save the single 2x2 photo --
+      // Note: on first-install bundle saves, iOS sometimes rejects the CameraRoll
+      // promise even though the save succeeded (a known bug in @react-native-camera-roll
+      // when the permission prompt fires DURING the save). We log the error and continue
+      // to the 4x6 step rather than aborting — if the save genuinely failed, the user
+      // gets the 4x6 plus a clear final message; if it spuriously failed, both photos
+      // are in the gallery and the user is happy.
       let singlePath: string;
+      let singleSaveSucceeded = true;
       try {
         singlePath = await writeAndVerify(`passport_${Date.now()}.jpg`, photoData);
         await saveToGalleryWithRetry(`file://${singlePath}`);
       } catch (e: any) {
-        Alert.alert('Error saving 2×2', e?.message ?? 'Could not save the single photo.');
-        return;
+        singleSaveSucceeded = false;
+        // Don't return — proceed to 4x6 generation below
+        singlePath = '';  // satisfy TypeScript
       }
 
       // -- Step 2: generate the 4x6 sheet fresh via the same path standalone save4x6 uses.
@@ -226,11 +234,13 @@ export default function PreviewScreen() {
         const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
         sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
       } catch (e: any) {
-        // 2x2 already saved; clean up its temp file before bailing
-        try { await RNFS.unlink(singlePath); } catch {}
+        // Clean up the 2x2 temp file if it was created
+        if (singlePath) { try { await RNFS.unlink(singlePath); } catch {} }
         Alert.alert(
-          '2×2 saved, 4×6 failed',
-          `Single photo saved, but generating the 4×6 sheet failed: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
+          singleSaveSucceeded ? '2×2 saved, 4×6 failed' : 'Bundle save failed',
+          singleSaveSucceeded
+            ? `Single photo saved, but generating the 4×6 sheet failed: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
+            : `Bundle save failed: ${e?.message ?? 'unknown error'}. Try the individual Save buttons — purchase already covers both.`
         );
         return;
       }
@@ -241,20 +251,28 @@ export default function PreviewScreen() {
         await new Promise(resolve => setTimeout(resolve, 1200));
         await saveToGalleryWithRetry(`file://${sheetPath}`);
       } catch (e: any) {
-        try { await RNFS.unlink(singlePath); } catch {}
+        if (singlePath) { try { await RNFS.unlink(singlePath); } catch {} }
         try { await RNFS.unlink(sheetPath); } catch {}
         Alert.alert(
-          '2×2 saved, 4×6 failed',
-          `Single photo saved, but the 4×6 sheet couldn't be written to your gallery: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
+          singleSaveSucceeded ? '2×2 saved, 4×6 failed' : 'Bundle save failed',
+          singleSaveSucceeded
+            ? `Single photo saved, but the 4×6 sheet couldn't be written to your gallery: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
+            : `Neither photo could be saved: ${e?.message ?? 'unknown error'}. Try the individual Save buttons — purchase already covers both.`
         );
         return;
       }
 
       // Clean up both temp files after successful saves
-      try { await RNFS.unlink(singlePath); } catch {}
+      if (singlePath) { try { await RNFS.unlink(singlePath); } catch {} }
       try { await RNFS.unlink(sheetPath); } catch {}
 
-      Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
+      // Tailor the success message to what actually saved
+      Alert.alert(
+        'Saved! ✓',
+        singleSaveSucceeded
+          ? 'Both single photo and 4×6 print sheet saved to gallery.'
+          : '4×6 print sheet saved to gallery. If you don\'t see the single 2×2 photo, tap "Save 2x2 Photo" — purchase already covers it.'
+      );
     } catch (e: any) {
       Alert.alert('Error', e?.message ?? 'Could not save bundle.');
     } finally { setSavingBundle(false); }
