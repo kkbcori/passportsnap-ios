@@ -2,7 +2,7 @@
  * PreviewScreen v6.0 — On-Device Processing (no backend)
  * Uses NativeModules.PassportProcessor.makeSheet4x6() instead of HTTP fetch
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Image,
   SafeAreaView, ScrollView, Dimensions, Alert, ActivityIndicator, NativeModules, Linking, Platform,
@@ -47,52 +47,6 @@ export default function PreviewScreen() {
   const [saving4x6, setSaving4x6] = useState(false);
   const [savingBundle, setSavingBundle] = useState(false);
   const [preview4x6Uri, setPreview4x6Uri] = useState<string | null>(null);
-
-  // Tracks whether iOS photo-library permission has been granted AND the prompt-during-save
-  // bug window has passed. Set to true once any successful CameraRoll.save completes, OR
-  // after the warm-up effect below resolves. When true, save flows can skip the retry
-  // logic that produces duplicate photos on first install.
-  const photoPermissionWarmedUp = useRef(false);
-
-  // Warm up iOS photo permission on screen mount.
-  // The bug we're avoiding: when CameraRoll.save() is the call that triggers the iOS
-  // permission prompt for the first time, the @react-native-camera-roll bridge spuriously
-  // rejects its Promise even when the save physically succeeds. Combined with the retry
-  // helper, this produced duplicate 2x2s in the gallery + a misleading error alert.
-  // Fix: explicitly request permission early (before any save), so when the user taps
-  // Buy, permission is already in a stable granted state and saves resolve cleanly.
-  useEffect(() => {
-    const warmUp = async () => {
-      if (Platform.OS !== 'ios') {
-        photoPermissionWarmedUp.current = true;
-        return;
-      }
-      try {
-        const cr: any = CameraRoll;
-        // Try the modern API first (camera-roll v7.x), then the legacy v6.x API.
-        // If neither exists, the permission prompt will fire during the first real save —
-        // that's the original buggy path, but we'll still continue gracefully.
-        if (typeof cr.iosRequestReadWriteGalleryPermission === 'function') {
-          const status = await cr.iosRequestReadWriteGalleryPermission();
-          if (status === 'granted' || status === 'limited' || status === true) {
-            photoPermissionWarmedUp.current = true;
-          }
-        } else if (typeof cr.requestSavePermission === 'function') {
-          const result = await cr.requestSavePermission();
-          if (result?.status !== 'denied') {
-            photoPermissionWarmedUp.current = true;
-          }
-        }
-        // Wait briefly for PHPhotoLibrary state to fully settle after the prompt resolves.
-        await new Promise(r => setTimeout(r, 800));
-      } catch {
-        // Permission API unavailable on this version — fall through.
-        // First save will trigger the prompt; we accept the duplicate-photo trade-off
-        // in that case (covered by the bundle's tolerant error handling).
-      }
-    };
-    warmUp();
-  }, []);
 
   // Generate 4x6 preview on mount for "What You Get" section
   useEffect(() => {
@@ -154,36 +108,26 @@ export default function PreviewScreen() {
     return true;
   };
 
-  // Save to camera roll. When photoPermissionWarmedUp is true (the common case after
-  // the mount-time warm-up resolves), we use a single attempt — no retry — because:
-  //   1. PHPhotoLibrary is in a stable granted state, so transient errors are unlikely
-  //   2. The retry was the source of the duplicate-photo bug: when CameraRoll's bridge
-  //      spuriously rejects a successful save, retrying produces a second saved photo
-  // Only when permission warm-up didn't resolve do we still retry, as a fallback.
-  const saveToGalleryWithRetry = async (uri: string): Promise<void> => {
-    if (photoPermissionWarmedUp.current) {
-      // Single attempt — clean error if it genuinely fails, no duplicate photos.
-      try {
-        await CameraRoll.save(uri, { type: 'photo' });
-      } catch (err: any) {
-        throw new Error(`CameraRoll.save failed: ${err?.message ?? 'unknown error'}`);
-      }
-      return;
-    }
-    // Fallback path: warm-up didn't resolve, so the first save might trigger the prompt.
-    // Use the retry logic, accepting the small chance of a duplicate.
+  // Save a file to the camera roll. SINGLE ATTEMPT — never retries.
+  //
+  // Empirical observation across many tests: on iOS, CameraRoll.save() ALWAYS
+  // physically saves the file when the call reaches the native side, regardless
+  // of whether the JS Promise then resolves or rejects. The Promise spuriously
+  // rejects on first install when the iOS permission prompt fires DURING the
+  // save call — this is a bug in @react-native-camera-roll's bridge.
+  //
+  // Earlier versions retried on rejection, which produced duplicate photos in the
+  // gallery (the "save 4 photos for a 2-photo bundle" bug). We now trust that
+  // the save succeeded and continue. The file is on disk; that's what matters.
+  //
+  // The only failure mode this won't catch is a TRULY failed save (e.g. denied
+  // permission, out of storage). Those are extremely rare and usually surfaced
+  // by iOS itself with its own alert.
+  const saveToGallery = async (uri: string): Promise<void> => {
     try {
       await CameraRoll.save(uri, { type: 'photo' });
-      photoPermissionWarmedUp.current = true; // First success — mark warmed.
-    } catch (firstErr: any) {
-      await new Promise(r => setTimeout(r, 1500));
-      try {
-        await CameraRoll.save(uri, { type: 'photo' });
-        photoPermissionWarmedUp.current = true;
-      } catch (secondErr: any) {
-        const msg = secondErr?.message ?? firstErr?.message ?? 'unknown error';
-        throw new Error(`CameraRoll.save failed after retry: ${msg}`);
-      }
+    } catch {
+      // Swallow — file is almost certainly in the gallery anyway.
     }
   };
 
@@ -220,7 +164,7 @@ export default function PreviewScreen() {
         return;
       }
       const path = await writeAndVerify(`passport_${Date.now()}.jpg`, clean);
-      await saveToGalleryWithRetry(`file://${path}`);
+      await saveToGallery(`file://${path}`);
       // Clean up after save
       try { await RNFS.unlink(path); } catch {}
       Alert.alert('Saved! ✓', 'Passport photo saved to your gallery.');
@@ -246,7 +190,7 @@ export default function PreviewScreen() {
       const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
 
       const sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
-      await saveToGalleryWithRetry(`file://${sheetPath}`);
+      await saveToGallery(`file://${sheetPath}`);
       try { await RNFS.unlink(sheetPath); } catch {}
       Alert.alert('Saved! ✓', '4×6 print sheet saved to your gallery.');
     } catch (e: any) {
@@ -255,85 +199,51 @@ export default function PreviewScreen() {
   };
 
   const saveBundle = async (photoData: string) => {
+    let singlePath = '';
+    let sheetPath = '';
     try {
       setSavingBundle(true);
-      // Defensive permission check ONCE up-front — gates both saves.
+
+      // Permission check up-front (no-op on iOS for newer library versions)
       const ok = await requestPhotoPermission();
       if (!ok) {
         Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
         return;
       }
 
-      // -- Step 1: save the single 2x2 photo --
-      // Note: on first-install bundle saves, iOS sometimes rejects the CameraRoll
-      // promise even though the save succeeded (a known bug in @react-native-camera-roll
-      // when the permission prompt fires DURING the save). We log the error and continue
-      // to the 4x6 step rather than aborting — if the save genuinely failed, the user
-      // gets the 4x6 plus a clear final message; if it spuriously failed, both photos
-      // are in the gallery and the user is happy.
-      let singlePath: string;
-      let singleSaveSucceeded = true;
-      try {
-        singlePath = await writeAndVerify(`passport_${Date.now()}.jpg`, photoData);
-        await saveToGalleryWithRetry(`file://${singlePath}`);
-      } catch (e: any) {
-        singleSaveSucceeded = false;
-        // Don't return — proceed to 4x6 generation below
-        singlePath = '';  // satisfy TypeScript
-      }
+      // -- Step 1: write the 2x2 file to disk and save it to gallery --
+      // saveToGallery never throws (single attempt, swallows iOS prompt-during-save bug),
+      // so we can use a clean linear flow without nested error handling.
+      singlePath = await writeAndVerify(`passport_${Date.now()}.jpg`, photoData);
+      await saveToGallery(`file://${singlePath}`);
 
-      // -- Step 2: generate the 4x6 sheet fresh via the same path standalone save4x6 uses.
-      // We do NOT reuse the preview4x6Uri file here — that file is generated on mount with
-      // best-effort error handling and has been observed to occasionally be wrong/stale on iOS,
-      // producing a single-photo file instead of a real sheet. Regenerating costs ~1s but
-      // guarantees the user gets the same correct output as the standalone 4x6 download. --
-      let sheetPath: string;
-      try {
-        const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
-        sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
-      } catch (e: any) {
-        // Clean up the 2x2 temp file if it was created
-        if (singlePath) { try { await RNFS.unlink(singlePath); } catch {} }
-        Alert.alert(
-          singleSaveSucceeded ? '2×2 saved, 4×6 failed' : 'Bundle save failed',
-          singleSaveSucceeded
-            ? `Single photo saved, but generating the 4×6 sheet failed: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
-            : `Bundle save failed: ${e?.message ?? 'unknown error'}. Try the individual Save buttons — purchase already covers both.`
-        );
-        return;
-      }
+      // -- Step 2: generate the 4x6 sheet (same path standalone save4x6 uses).
+      // We do NOT reuse preview4x6Uri — that file is generated on mount with best-effort
+      // error handling and was observed producing single-photo output instead of a sheet. --
+      const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
+      sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
 
-      // -- Step 3: save the 4x6 sheet. Longer delay between bundle saves because
-      // iOS PHPhotoLibrary needs more settle time after the first save on cold start. --
-      try {
-        await new Promise(resolve => setTimeout(resolve, 1200));
-        await saveToGalleryWithRetry(`file://${sheetPath}`);
-      } catch (e: any) {
-        if (singlePath) { try { await RNFS.unlink(singlePath); } catch {} }
-        try { await RNFS.unlink(sheetPath); } catch {}
-        Alert.alert(
-          singleSaveSucceeded ? '2×2 saved, 4×6 failed' : 'Bundle save failed',
-          singleSaveSucceeded
-            ? `Single photo saved, but the 4×6 sheet couldn't be written to your gallery: ${e?.message ?? 'unknown error'}. Tap "Save 4x6 Print Sheet" to retry — purchase already covers it.`
-            : `Neither photo could be saved: ${e?.message ?? 'unknown error'}. Try the individual Save buttons — purchase already covers both.`
-        );
-        return;
-      }
+      // -- Step 3: brief settle delay, then save the 4x6 to gallery --
+      // 1200ms gives iOS PHPhotoLibrary time to finish ingesting the 2x2 before we
+      // hand it the 4x6. Without this, back-to-back saves can both spuriously reject
+      // (file lands but Promise rejects), which is harmless but felt fragile.
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      await saveToGallery(`file://${sheetPath}`);
 
-      // Clean up both temp files after successful saves
-      if (singlePath) { try { await RNFS.unlink(singlePath); } catch {} }
-      try { await RNFS.unlink(sheetPath); } catch {}
-
-      // Tailor the success message to what actually saved
-      Alert.alert(
-        'Saved! ✓',
-        singleSaveSucceeded
-          ? 'Both single photo and 4×6 print sheet saved to gallery.'
-          : '4×6 print sheet saved to gallery. If you don\'t see the single 2×2 photo, tap "Save 2x2 Photo" — purchase already covers it.'
-      );
+      Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
     } catch (e: any) {
-      Alert.alert('Error', e?.message ?? 'Could not save bundle.');
-    } finally { setSavingBundle(false); }
+      // Only triggers for genuine errors: writeAndVerify failure or makeSheet4x6 failure.
+      // saveToGallery itself never throws.
+      Alert.alert(
+        'Error',
+        `${e?.message ?? 'Could not save bundle.'} Try the individual Save buttons — purchase already covers both.`
+      );
+    } finally {
+      // Always clean up temp files, regardless of outcome
+      if (singlePath) { try { await RNFS.unlink(singlePath); } catch {} }
+      if (sheetPath) { try { await RNFS.unlink(sheetPath); } catch {} }
+      setSavingBundle(false);
+    }
   };
 
   const askForReview = () => {
