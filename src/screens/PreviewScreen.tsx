@@ -48,6 +48,52 @@ export default function PreviewScreen() {
   const [savingBundle, setSavingBundle] = useState(false);
   const [preview4x6Uri, setPreview4x6Uri] = useState<string | null>(null);
 
+  // Tracks whether iOS photo-library permission has been granted AND the prompt-during-save
+  // bug window has passed. Set to true once any successful CameraRoll.save completes, OR
+  // after the warm-up effect below resolves. When true, save flows can skip the retry
+  // logic that produces duplicate photos on first install.
+  const photoPermissionWarmedUp = useRef(false);
+
+  // Warm up iOS photo permission on screen mount.
+  // The bug we're avoiding: when CameraRoll.save() is the call that triggers the iOS
+  // permission prompt for the first time, the @react-native-camera-roll bridge spuriously
+  // rejects its Promise even when the save physically succeeds. Combined with the retry
+  // helper, this produced duplicate 2x2s in the gallery + a misleading error alert.
+  // Fix: explicitly request permission early (before any save), so when the user taps
+  // Buy, permission is already in a stable granted state and saves resolve cleanly.
+  useEffect(() => {
+    const warmUp = async () => {
+      if (Platform.OS !== 'ios') {
+        photoPermissionWarmedUp.current = true;
+        return;
+      }
+      try {
+        const cr: any = CameraRoll;
+        // Try the modern API first (camera-roll v7.x), then the legacy v6.x API.
+        // If neither exists, the permission prompt will fire during the first real save —
+        // that's the original buggy path, but we'll still continue gracefully.
+        if (typeof cr.iosRequestReadWriteGalleryPermission === 'function') {
+          const status = await cr.iosRequestReadWriteGalleryPermission();
+          if (status === 'granted' || status === 'limited' || status === true) {
+            photoPermissionWarmedUp.current = true;
+          }
+        } else if (typeof cr.requestSavePermission === 'function') {
+          const result = await cr.requestSavePermission();
+          if (result?.status !== 'denied') {
+            photoPermissionWarmedUp.current = true;
+          }
+        }
+        // Wait briefly for PHPhotoLibrary state to fully settle after the prompt resolves.
+        await new Promise(r => setTimeout(r, 800));
+      } catch {
+        // Permission API unavailable on this version — fall through.
+        // First save will trigger the prompt; we accept the duplicate-photo trade-off
+        // in that case (covered by the bundle's tolerant error handling).
+      }
+    };
+    warmUp();
+  }, []);
+
   // Generate 4x6 preview on mount for "What You Get" section
   useEffect(() => {
     const gen4x6Preview = async () => {
@@ -108,21 +154,33 @@ export default function PreviewScreen() {
     return true;
   };
 
-  // Save to camera roll with one automatic retry on native errors.
-  // First-time saves on iOS sometimes throw "unknown error on native" because
-  // PHPhotoLibrary is still settling after the permission grant of a previous save,
-  // and back-to-back writes (2x2 then 4x6) hit a transient error window.
-  // Retrying once after a longer delay clears it virtually every time.
+  // Save to camera roll. When photoPermissionWarmedUp is true (the common case after
+  // the mount-time warm-up resolves), we use a single attempt — no retry — because:
+  //   1. PHPhotoLibrary is in a stable granted state, so transient errors are unlikely
+  //   2. The retry was the source of the duplicate-photo bug: when CameraRoll's bridge
+  //      spuriously rejects a successful save, retrying produces a second saved photo
+  // Only when permission warm-up didn't resolve do we still retry, as a fallback.
   const saveToGalleryWithRetry = async (uri: string): Promise<void> => {
+    if (photoPermissionWarmedUp.current) {
+      // Single attempt — clean error if it genuinely fails, no duplicate photos.
+      try {
+        await CameraRoll.save(uri, { type: 'photo' });
+      } catch (err: any) {
+        throw new Error(`CameraRoll.save failed: ${err?.message ?? 'unknown error'}`);
+      }
+      return;
+    }
+    // Fallback path: warm-up didn't resolve, so the first save might trigger the prompt.
+    // Use the retry logic, accepting the small chance of a duplicate.
     try {
       await CameraRoll.save(uri, { type: 'photo' });
+      photoPermissionWarmedUp.current = true; // First success — mark warmed.
     } catch (firstErr: any) {
-      // Wait for PHPhotoLibrary to settle, then retry once.
       await new Promise(r => setTimeout(r, 1500));
       try {
         await CameraRoll.save(uri, { type: 'photo' });
+        photoPermissionWarmedUp.current = true;
       } catch (secondErr: any) {
-        // Surface a useful message — include both attempts for diagnostics.
         const msg = secondErr?.message ?? firstErr?.message ?? 'unknown error';
         throw new Error(`CameraRoll.save failed after retry: ${msg}`);
       }
