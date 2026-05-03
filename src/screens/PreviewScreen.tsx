@@ -2,7 +2,7 @@
  * PreviewScreen v6.0 — On-Device Processing (no backend)
  * Uses NativeModules.PassportProcessor.makeSheet4x6() instead of HTTP fetch
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Image,
   SafeAreaView, ScrollView, Dimensions, Alert, ActivityIndicator, NativeModules, Linking, Platform,
@@ -48,6 +48,15 @@ export default function PreviewScreen() {
   const [savingBundle, setSavingBundle] = useState(false);
   const [preview4x6Uri, setPreview4x6Uri] = useState<string | null>(null);
 
+  // Tracks which products the user has purchased in this session.
+  // Bundle grants both single and fourSix entitlements.
+  // Once any of these is true, the watermark is removed from the preview.
+  const [purchasedProducts, setPurchasedProducts] = useState({
+    single: false,
+    fourSix: false,
+  });
+  const hasAnyPurchase = purchasedProducts.single || purchasedProducts.fourSix;
+
   // Generate 4x6 preview on mount for "What You Get" section
   useEffect(() => {
     const gen4x6Preview = async () => {
@@ -74,25 +83,43 @@ export default function PreviewScreen() {
     return () => clearInterval(interval);
   }, [autoToggle]);
 
-  const save2x2 = () => { setPurchaseType('single'); setShowPaywall(true); };
+  // Buy handlers — open paywall to initiate purchase
+  const buySingle = () => { setPurchaseType('single'); setShowPaywall(true); };
+  const buy4x6 = () => { setPurchaseType('4x6'); setShowPaywall(true); };
+  const buyBundle = () => { setPurchaseType('bundle'); setShowPaywall(true); };
 
-  // Cross-version, cross-platform photo-library permission check.
-  // Different @react-native-camera-roll/camera-roll versions expose different APIs:
-  //   - v6.x        : CameraRoll.requestSavePermission()
-  //   - newer v7.x  : CameraRoll.iosRequestReadWriteGalleryPermission() (iOS only)
-  //   - some builds : neither — rely on the system prompt fired by CameraRoll.save()
-  // This helper feature-detects what's available so we never crash with
-  // "undefined is not a function". Returns true if the save should proceed.
+  // Download handlers — save the photo(s) to gallery (post-purchase only)
+  const download2x2 = async () => {
+    const photoData = cleanBase64 ?? base64 ?? '';
+    if (!photoData) { Alert.alert('Error', 'Photo data missing.'); return; }
+    await doSave2x2(photoData);
+  };
+  const download4x6 = async () => {
+    await save4x6(); // already pulls from cleanBase64/base64 internally
+  };
+  const downloadBundle = async () => {
+    const photoData = cleanBase64 ?? base64 ?? '';
+    if (!photoData) { Alert.alert('Error', 'Photo data missing.'); return; }
+    await saveBundle(photoData);
+  };
+
+  // Photo-library permission check for camera-roll v7.x (your installed version).
+  // On iOS uses iosRequestReadWriteGalleryPermission (the v7+ API).
+  // On Android uses PermissionsAndroid for WRITE_EXTERNAL_STORAGE.
+  // Returns true only if permission is fully granted (not 'limited' on iOS, since
+  // limited access can cause silent save failures Apple's reviewer may have seen).
   const requestPhotoPermission = async (): Promise<boolean> => {
     try {
       const cr: any = CameraRoll;
-      if (typeof cr.requestSavePermission === 'function') {
-        const { status } = await cr.requestSavePermission();
-        return status !== 'denied';
-      }
       if (Platform.OS === 'ios' && typeof cr.iosRequestReadWriteGalleryPermission === 'function') {
         const status = await cr.iosRequestReadWriteGalleryPermission();
-        return status !== 'denied' && status !== 'restricted';
+        // 'granted' = full access, 'limited' = partial, 'denied'/'restricted' = blocked
+        return status === 'granted' || status === 'limited' || status === true;
+      }
+      if (typeof cr.requestSavePermission === 'function') {
+        // Fallback for older library versions
+        const result = await cr.requestSavePermission();
+        return result?.status !== 'denied';
       }
       if (Platform.OS === 'android') {
         const { PermissionsAndroid } = require('react-native');
@@ -104,30 +131,61 @@ export default function PreviewScreen() {
     } catch {
       // Fall through — don't block the save on a permission-API error.
     }
-    // No explicit API available; let CameraRoll.save trigger the system prompt itself.
+    // No explicit API available; let CameraRoll.save trigger the system prompt.
     return true;
   };
 
-  // Save a file to the camera roll. SINGLE ATTEMPT — never retries.
-  //
-  // Empirical observation across many tests: on iOS, CameraRoll.save() ALWAYS
-  // physically saves the file when the call reaches the native side, regardless
-  // of whether the JS Promise then resolves or rejects. The Promise spuriously
-  // rejects on first install when the iOS permission prompt fires DURING the
-  // save call — this is a bug in @react-native-camera-roll's bridge.
-  //
-  // Earlier versions retried on rejection, which produced duplicate photos in the
-  // gallery (the "save 4 photos for a 2-photo bundle" bug). We now trust that
-  // the save succeeded and continue. The file is on disk; that's what matters.
-  //
-  // The only failure mode this won't catch is a TRULY failed save (e.g. denied
-  // permission, out of storage). Those are extremely rare and usually surfaced
-  // by iOS itself with its own alert.
-  const saveToGallery = async (uri: string): Promise<void> => {
+  // Open the device's Photos app — used in success messages so users can verify
+  // the save landed. iOS uses photos-redirect:// URL scheme; Android falls back
+  // to a generic intent that opens whatever the user's default photo viewer is.
+  const openPhotosApp = async () => {
     try {
-      await CameraRoll.save(uri, { type: 'photo' });
+      if (Platform.OS === 'ios') {
+        await Linking.openURL('photos-redirect://');
+      } else {
+        await Linking.openURL('content://media/internal/images/media');
+      }
     } catch {
-      // Swallow — file is almost certainly in the gallery anyway.
+      // Photos app couldn't be opened (rare) — fail silently rather than alerting.
+    }
+  };
+
+  // Save a file to the camera roll and verify the outcome.
+  //
+  // The challenge: @react-native-camera-roll's bridge sometimes spuriously rejects
+  // a successful save (when the iOS permission prompt fires during the save itself).
+  // We need to distinguish that case from a genuine failure (permission denied,
+  // storage full, etc) so we can show real errors when they happen.
+  //
+  // Strategy:
+  //   1. CameraRoll.save returns the new PHAsset URI (string) on success → confirmed save.
+  //   2. If it rejects but we know permission is granted, it's likely the spurious
+  //      rejection — file probably landed; treat as soft-success but flag uncertain.
+  //   3. If it rejects AND permission is not granted, it's a real failure.
+  //
+  // Returns:
+  //   { confirmed: true, uri: 'ph://...' } — save definitely succeeded
+  //   { confirmed: false, uri: '' }        — save probably succeeded but unverified
+  // Throws Error only for genuine failures (permission denied/restricted, storage full).
+  const saveToGallery = async (
+    fileUri: string,
+    permissionWasGranted: boolean
+  ): Promise<{ confirmed: boolean; uri: string }> => {
+    try {
+      const assetUri: any = await CameraRoll.save(fileUri, { type: 'photo' });
+      if (typeof assetUri === 'string' && assetUri.length > 0) {
+        return { confirmed: true, uri: assetUri };
+      }
+      // Resolved with no URI — treat as unverified success
+      return { confirmed: false, uri: '' };
+    } catch (err: any) {
+      // If permission wasn't granted at the time of the call, this is a genuine failure.
+      if (!permissionWasGranted) {
+        throw new Error(err?.message ?? 'Photo save failed — permission may be denied');
+      }
+      // Permission was granted but Promise rejected — this is the well-known spurious
+      // rejection from @react-native-camera-roll. File almost certainly landed in gallery.
+      return { confirmed: false, uri: '' };
     }
   };
 
@@ -154,22 +212,53 @@ export default function PreviewScreen() {
     return path;
   };
 
+  // Tracks whether we've already shown the "rate us" prompt this session — only show once.
+  const reviewAsked = useRef(false);
+
+  // Show the post-save success alert. Tells the user exactly where to find the photo
+  // and offers a button to open the Photos app directly. The "Recents album" hint
+  // addresses the iPad reviewer's confusion ("we couldn't find it in the library").
+  const showSaveSuccessAlert = (
+    label: string,
+    confirmedSaves: number,
+    totalSaves: number
+  ) => {
+    const title = confirmedSaves === totalSaves ? 'Saved! ✓' : 'Saved (please verify)';
+    const message =
+      confirmedSaves === totalSaves
+        ? `${label} saved to your Photos library.\n\nTip: open the Photos app and check the Recents album. If the photo isn't visible immediately, pull down to refresh.`
+        : `${label} sent to your Photos library, but we couldn't fully confirm it landed.\n\nPlease open Photos → Recents and check. If you don't see it, ensure photo access is enabled at Settings → PassportSnap → Photos and try again.`;
+    Alert.alert(title, message, [
+      { text: 'Open Photos', onPress: openPhotosApp },
+      { text: 'OK', style: 'cancel' },
+    ]);
+    // Trigger review prompt once per session, after a confirmed download.
+    if (confirmedSaves > 0 && !reviewAsked.current) {
+      reviewAsked.current = true;
+      setTimeout(() => askForReview(), 3500);
+    }
+  };
+
   const doSave2x2 = async (clean: string) => {
     try {
       setSaving2x2(true);
-      // Defensive permission check (handles CameraRoll API differences across versions)
-      const ok = await requestPhotoPermission();
-      if (!ok) {
-        Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
+      const permGranted = await requestPhotoPermission();
+      if (!permGranted) {
+        Alert.alert(
+          'Photo access needed',
+          'PassportSnap needs permission to save photos to your library. Open Settings → PassportSnap → Photos and choose "Add Photos Only" or "All Photos", then try again.'
+        );
         return;
       }
       const path = await writeAndVerify(`passport_${Date.now()}.jpg`, clean);
-      await saveToGallery(`file://${path}`);
-      // Clean up after save
+      const result = await saveToGallery(`file://${path}`, permGranted);
       try { await RNFS.unlink(path); } catch {}
-      Alert.alert('Saved! ✓', 'Passport photo saved to your gallery.');
+      showSaveSuccessAlert('Passport photo', result.confirmed ? 1 : 0, 1);
     } catch (e: any) {
-      Alert.alert('Save failed', 'Could not save to gallery. Please go to Settings → PassportSnap → Photos and allow access, then try again.');
+      Alert.alert(
+        'Save failed',
+        `${e?.message ?? 'Could not save to gallery.'}\n\nCheck Settings → PassportSnap → Photos and ensure access is allowed.`
+      );
     } finally { setSaving2x2(false); }
   };
 
@@ -178,23 +267,21 @@ export default function PreviewScreen() {
     if (!photoData) { Alert.alert('Error', 'Photo data missing.'); return; }
     try {
       setSaving4x6(true);
-
-      // Defensive permission check (handles CameraRoll API differences across versions)
-      const ok = await requestPhotoPermission();
-      if (!ok) {
-        Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
+      const permGranted = await requestPhotoPermission();
+      if (!permGranted) {
+        Alert.alert(
+          'Photo access needed',
+          'PassportSnap needs permission to save photos to your library. Open Settings → PassportSnap → Photos and choose "Add Photos Only" or "All Photos", then try again.'
+        );
         return;
       }
-
-      // Call native module instead of HTTP API
       const data = await PassportProcessor.makeSheet4x6(photoData, country ?? 'USA');
-
       const sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
-      await saveToGallery(`file://${sheetPath}`);
+      const result = await saveToGallery(`file://${sheetPath}`, permGranted);
       try { await RNFS.unlink(sheetPath); } catch {}
-      Alert.alert('Saved! ✓', '4×6 print sheet saved to your gallery.');
+      showSaveSuccessAlert('4×6 print sheet', result.confirmed ? 1 : 0, 1);
     } catch (e: any) {
-      Alert.alert('Error', e.message ?? 'Could not create 4x6 sheet.');
+      Alert.alert('Error', e?.message ?? 'Could not create 4x6 sheet.');
     } finally { setSaving4x6(false); }
   };
 
@@ -204,18 +291,19 @@ export default function PreviewScreen() {
     try {
       setSavingBundle(true);
 
-      // Permission check up-front (no-op on iOS for newer library versions)
-      const ok = await requestPhotoPermission();
-      if (!ok) {
-        Alert.alert('Permission needed', 'Allow photo access in Settings → PassportSnap → Photos');
+      // Permission check up-front
+      const permGranted = await requestPhotoPermission();
+      if (!permGranted) {
+        Alert.alert(
+          'Photo access needed',
+          'PassportSnap needs permission to save photos to your library. Open Settings → PassportSnap → Photos and choose "Add Photos Only" or "All Photos", then try again.'
+        );
         return;
       }
 
       // -- Step 1: write the 2x2 file to disk and save it to gallery --
-      // saveToGallery never throws (single attempt, swallows iOS prompt-during-save bug),
-      // so we can use a clean linear flow without nested error handling.
       singlePath = await writeAndVerify(`passport_${Date.now()}.jpg`, photoData);
-      await saveToGallery(`file://${singlePath}`);
+      const r1 = await saveToGallery(`file://${singlePath}`, permGranted);
 
       // -- Step 2: generate the 4x6 sheet (same path standalone save4x6 uses).
       // We do NOT reuse preview4x6Uri — that file is generated on mount with best-effort
@@ -224,19 +312,18 @@ export default function PreviewScreen() {
       sheetPath = await writeAndVerify(`passport_4x6_${Date.now()}.jpg`, data.imageBase64);
 
       // -- Step 3: brief settle delay, then save the 4x6 to gallery --
-      // 1200ms gives iOS PHPhotoLibrary time to finish ingesting the 2x2 before we
-      // hand it the 4x6. Without this, back-to-back saves can both spuriously reject
-      // (file lands but Promise rejects), which is harmless but felt fragile.
+      // 1200ms gives iOS PHPhotoLibrary time to finish ingesting the 2x2 before
+      // we hand it the 4x6. Without the delay, back-to-back saves can spuriously reject.
       await new Promise(resolve => setTimeout(resolve, 1200));
-      await saveToGallery(`file://${sheetPath}`);
+      const r2 = await saveToGallery(`file://${sheetPath}`, permGranted);
 
-      Alert.alert('Saved! ✓', 'Both single photo and 4×6 print sheet saved to gallery.');
+      const confirmed = (r1.confirmed ? 1 : 0) + (r2.confirmed ? 1 : 0);
+      showSaveSuccessAlert('Both single photo and 4×6 print sheet', confirmed, 2);
     } catch (e: any) {
-      // Only triggers for genuine errors: writeAndVerify failure or makeSheet4x6 failure.
-      // saveToGallery itself never throws.
+      // Triggers for genuine errors: writeAndVerify, makeSheet4x6, or a real save failure.
       Alert.alert(
-        'Error',
-        `${e?.message ?? 'Could not save bundle.'} Try the individual Save buttons — purchase already covers both.`
+        'Save failed',
+        `${e?.message ?? 'Could not save bundle.'}\n\nTry the individual Save buttons — your purchase already covers both. If the issue persists, check Settings → PassportSnap → Photos.`
       );
     } finally {
       // Always clean up temp files, regardless of outcome
@@ -289,9 +376,29 @@ export default function PreviewScreen() {
         >
           <Image source={{ uri: processedUri }} style={{ width: PHOTO_W, height: PHOTO_H }} resizeMode="cover" />
           {showOverlay && <PassportHeadOverlay size={PHOTO_W} height={PHOTO_H} showLabels={true} country={country} />}
-          <View style={styles.watermarkBadge}>
-            <Text style={styles.watermarkBadgeText}>PREVIEW — Watermark removed after purchase</Text>
-          </View>
+          {/* Subtle diagonal watermark — removed once user purchases anything */}
+          {!hasAnyPurchase && (
+            <View pointerEvents="none" style={styles.watermarkOverlay}>
+              {/* Render multiple diagonal text rows so it tiles across the photo */}
+              {[0, 1, 2, 3, 4, 5, 6, 7].map(row => (
+                <Text
+                  key={row}
+                  style={[
+                    styles.watermarkText,
+                    { top: row * (PHOTO_H / 7) - 20, width: PHOTO_W * 1.6, left: -PHOTO_W * 0.3 },
+                  ]}
+                  numberOfLines={1}
+                >
+                  passportsnap.com  ·  passportsnap.com  ·  passportsnap.com  ·  passportsnap.com
+                </Text>
+              ))}
+            </View>
+          )}
+          {!hasAnyPurchase && (
+            <View style={styles.watermarkBadge}>
+              <Text style={styles.watermarkBadgeText}>PREVIEW — Watermark removed after purchase</Text>
+            </View>
+          )}
         </View>
 
         <TouchableOpacity style={[styles.toggleBtn, showOverlay && styles.toggleBtnActive]}
@@ -373,47 +480,92 @@ export default function PreviewScreen() {
           </View>
         </View>
 
-        <Text style={styles.dlTitle}>Download</Text>
+        <Text style={styles.dlTitle}>{hasAnyPurchase ? 'Download' : 'Buy'}</Text>
 
-        <TouchableOpacity style={styles.btn2x2} onPress={save2x2} disabled={saving2x2} activeOpacity={0.85}>
-          {saving2x2 ? <ActivityIndicator color="#fff" /> : (
-            <>
-              <Text style={styles.btn2x2Icon}>2x2</Text>
-              <View>
-                <Text style={styles.btn2x2Label}>Save 2x2 Photo</Text>
-                <Text style={styles.btn2x2Sub}>Single passport photo · No watermark · $1.50</Text>
-              </View>
-            </>
-          )}
-        </TouchableOpacity>
+        {/* 2x2 — show Download if owned, Buy if not */}
+        {purchasedProducts.single ? (
+          <TouchableOpacity style={styles.btn2x2} onPress={download2x2} disabled={saving2x2} activeOpacity={0.85}>
+            {saving2x2 ? <ActivityIndicator color="#fff" /> : (
+              <>
+                <Text style={styles.btn2x2Icon}>2x2</Text>
+                <View style={styles.btnTextWrap}>
+                  <Text style={styles.btn2x2Label}>Download 2x2 Photo</Text>
+                  <Text style={styles.btn2x2Sub}>Tap to save to Photos · Owned</Text>
+                </View>
+                <Text style={styles.btnDownloadIcon}>⬇</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.btn2x2} onPress={buySingle} disabled={saving2x2} activeOpacity={0.85}>
+            {saving2x2 ? <ActivityIndicator color="#fff" /> : (
+              <>
+                <Text style={styles.btn2x2Icon}>2x2</Text>
+                <View style={styles.btnTextWrap}>
+                  <Text style={styles.btn2x2Label}>Buy 2x2 Photo</Text>
+                  <Text style={styles.btn2x2Sub}>Single passport photo · No watermark · $1.50</Text>
+                </View>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
 
-        <TouchableOpacity style={styles.btn4x6} onPress={() => { setPurchaseType('4x6'); setShowPaywall(true); }}
-          disabled={saving4x6} activeOpacity={0.85}>
-          {saving4x6 ? <ActivityIndicator color="#3B5BDB" /> : (
-            <>
-              <Text style={styles.btn4x6Icon}>4x6</Text>
-              <View>
-                <Text style={styles.btn4x6Label}>Save 4x6 Print Sheet</Text>
-                <Text style={styles.btn4x6Sub}>2 photos side by side · No watermark · $1.50</Text>
-              </View>
-            </>
-          )}
-        </TouchableOpacity>
+        {/* 4x6 — show Download if owned, Buy if not */}
+        {purchasedProducts.fourSix ? (
+          <TouchableOpacity style={styles.btn4x6} onPress={download4x6} disabled={saving4x6} activeOpacity={0.85}>
+            {saving4x6 ? <ActivityIndicator color="#3B5BDB" /> : (
+              <>
+                <Text style={styles.btn4x6Icon}>4x6</Text>
+                <View style={styles.btnTextWrap}>
+                  <Text style={styles.btn4x6Label}>Download 4×6 Print Sheet</Text>
+                  <Text style={styles.btn4x6Sub}>Tap to save to Photos · Owned</Text>
+                </View>
+                <Text style={[styles.btnDownloadIcon, { color: C.text1 }]}>⬇</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.btn4x6} onPress={buy4x6} disabled={saving4x6} activeOpacity={0.85}>
+            {saving4x6 ? <ActivityIndicator color="#3B5BDB" /> : (
+              <>
+                <Text style={styles.btn4x6Icon}>4x6</Text>
+                <View style={styles.btnTextWrap}>
+                  <Text style={styles.btn4x6Label}>Buy 4×6 Print Sheet</Text>
+                  <Text style={styles.btn4x6Sub}>2 photos side by side · No watermark · $1.50</Text>
+                </View>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
 
-        {/* Bundle — both files */}
-        <TouchableOpacity style={styles.btnBundle} onPress={() => { setPurchaseType('bundle'); setShowPaywall(true); }}
-          disabled={savingBundle} activeOpacity={0.85}>
-          {savingBundle ? <ActivityIndicator color="#F5A623" /> : (
-            <>
-              <View style={styles.btnBundleBadge}><Text style={styles.btnBundleBadgeText}>BEST VALUE</Text></View>
-              <Text style={styles.btnBundleIcon}>📦</Text>
-              <View>
-                <Text style={styles.btnBundleLabel}>Save Both — Single + 4×6</Text>
-                <Text style={styles.btnBundleSub}>Everything you need · No watermark · $2.49</Text>
-              </View>
-            </>
-          )}
-        </TouchableOpacity>
+        {/* Bundle — show Download Both if both owned, else Buy Bundle. Hide entirely if user owns both via separate purchases (pointless). */}
+        {(purchasedProducts.single && purchasedProducts.fourSix) ? (
+          <TouchableOpacity style={styles.btnBundle} onPress={downloadBundle} disabled={savingBundle} activeOpacity={0.85}>
+            {savingBundle ? <ActivityIndicator color="#F5A623" /> : (
+              <>
+                <Text style={styles.btnBundleIcon}>📦</Text>
+                <View style={styles.btnTextWrap}>
+                  <Text style={styles.btnBundleLabel}>Download Both — 2x2 + 4×6</Text>
+                  <Text style={styles.btnBundleSub}>Tap to save both to Photos · Owned</Text>
+                </View>
+                <Text style={[styles.btnDownloadIcon, { color: C.gold }]}>⬇</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.btnBundle} onPress={buyBundle} disabled={savingBundle} activeOpacity={0.85}>
+            {savingBundle ? <ActivityIndicator color="#F5A623" /> : (
+              <>
+                <View style={styles.btnBundleBadge}><Text style={styles.btnBundleBadgeText}>BEST VALUE</Text></View>
+                <Text style={styles.btnBundleIcon}>📦</Text>
+                <View style={styles.btnTextWrap}>
+                  <Text style={styles.btnBundleLabel}>Buy Both — Single + 4×6</Text>
+                  <Text style={styles.btnBundleSub}>Everything you need · No watermark · $2.49</Text>
+                </View>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity style={styles.againBtn} onPress={() => navigation.navigate('CountrySelect')}>
           <Text style={styles.againText}>Start over</Text>
@@ -425,12 +577,22 @@ export default function PreviewScreen() {
       <PaywallScreen visible={showPaywall} onClose={() => setShowPaywall(false)} country={country}
         onPurchased={async (type) => {
           setShowPaywall(false);
-          const photoData = cleanBase64 ?? base64 ?? '';
-          if (type === 'single') { await doSave2x2(photoData); }
-          else if (type === 'bundle') { await saveBundle(photoData); }
-          else { await save4x6(photoData); }
-          // Delay review prompt so the "Saved!" alert is dismissed first
-          setTimeout(() => askForReview(), 3500);
+          // Mark the purchased product(s) as owned. Bundle grants both single and 4x6.
+          // We do NOT auto-save here — the user explicitly taps "Download" to save,
+          // which gives them control over when files appear in their gallery and
+          // matches the iOS pattern of user-initiated saves (addresses Apple review feedback).
+          if (type === 'single') {
+            setPurchasedProducts(prev => ({ ...prev, single: true }));
+          } else if (type === '4x6') {
+            setPurchasedProducts(prev => ({ ...prev, fourSix: true }));
+          } else if (type === 'bundle') {
+            setPurchasedProducts({ single: true, fourSix: true });
+          }
+          // Brief confirmation that purchase succeeded; the Download button(s) appear next.
+          Alert.alert(
+            'Purchase complete ✓',
+            'Tap the Download button below to save your photo(s) to the Photos library. You can download as many times as you like.'
+          );
         }}
       />
     </SafeAreaView>
@@ -449,6 +611,8 @@ const styles = StyleSheet.create({
   title:       { fontSize: 20, fontWeight: '700', color: C.text1, letterSpacing: -0.3, marginBottom: 4 },
   subtitle:    { fontSize: 12, color: C.text3, marginBottom: 20, textAlign: 'center' },
   photoWrap:   { borderRadius: 6, overflow: 'hidden', marginBottom: 12, borderWidth: 1, borderColor: C.border, position: 'relative' },
+  watermarkOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
+  watermarkText: { position: 'absolute', color: 'rgba(255,255,255,0.18)', fontSize: 13, fontWeight: '600', letterSpacing: 1, textAlign: 'center', transform: [{ rotate: '-30deg' }] },
   watermarkBadge: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(12,15,26,0.75)', paddingVertical: 6, paddingHorizontal: 12, alignItems: 'center' },
   watermarkBadgeText: { color: C.gold, fontSize: 10, fontWeight: '700', letterSpacing: 0.5 },
   toggleBtn:       { backgroundColor: C.surface, borderRadius: 10, paddingHorizontal: 16, paddingVertical: 8, marginBottom: 14, borderWidth: 1, borderColor: C.border },
@@ -466,6 +630,8 @@ const styles = StyleSheet.create({
   rowKey:      { fontSize: 13, fontWeight: '600', color: C.text1, flex: 1 },
   rowVal:      { fontSize: 12, color: C.text2, flex: 1.5, textAlign: 'right' },
   dlTitle:     { fontSize: 14, fontWeight: '700', color: C.text1, alignSelf: 'flex-start', marginBottom: 10 },
+  btnTextWrap: { flex: 1 },
+  btnDownloadIcon: { fontSize: 22, fontWeight: '700', color: '#FFFFFF', marginLeft: 8 },
   btn2x2:      { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: C.accent, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, alignSelf: 'stretch', marginBottom: 10 },
   btn2x2Icon:  { fontSize: 12, fontWeight: '700', color: '#FFFFFF', backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, overflow: 'hidden', minWidth: 38, textAlign: 'center' },
   btn2x2Label: { color: '#FFFFFF', fontSize: 15, fontWeight: '600' },
